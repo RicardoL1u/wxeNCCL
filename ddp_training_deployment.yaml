@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ddp-training
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: ddp-training
+  template:
+    metadata:
+      labels:
+        app: ddp-training
+    spec:
+      containers:
+      - name: ddp-container
+        image: pytorch/pytorch:1.9.0-cuda11.1-cudnn8-runtime
+        env:
+        - name: WORLD_SIZE
+          value: "4"
+        - name: RANK
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: MASTER_ADDR
+          value: "ddp-master"
+        - name: MASTER_PORT
+          value: "8888"
+        ports:
+        - containerPort: 8888
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ddp-master
+spec:
+  selector:
+    app: ddp-training
+  ports:
+  - port: 8888
+    targetPort: 8888
