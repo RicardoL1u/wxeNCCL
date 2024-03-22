@@ -1,8 +1,9 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: ddp-training
 spec:
+  serviceName: "ddp-master"
   replicas: 4
   selector:
     matchLabels:
@@ -14,13 +15,14 @@ spec:
     spec:
       containers:
       - name: ddp-container
-        image: pytorch/pytorch:1.9.0-cuda11.1-cudnn8-runtime
+        image: fortypercent/ddp-training-cpu:v7.0
         env:
         - name: WORLD_SIZE
           value: "4"
         - name: RANK
           valueFrom:
             fieldRef:
+              apiVersion: v1
               fieldPath: metadata.name
         - name: MASTER_ADDR
           value: "ddp-master"
@@ -28,9 +30,7 @@ spec:
           value: "8888"
         ports:
         - containerPort: 8888
-        resources:
-          limits:
-            nvidia.com/gpu: 1
+        command: ["/bin/sh", "-c", "tail -f /dev/null & python train_ddp.py & wait"]
 ---
 apiVersion: v1
 kind: Service
