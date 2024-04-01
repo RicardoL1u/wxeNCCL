@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+option go_package = "."; 
+package messageControllerMaster;
+
+// 服务定义
+service TaskManager {
+  // 定义worker订阅任务的RPC方法
+  rpc SubscribeToTask(TaskSubscription) returns (SubscriptionResponse) {}
+
+  // 添加更新worker配置的RPC方法
+  rpc UpdateWorkerConfig(UpdateConfigRequest) returns (UpdateConfigResponse) {}
+}
+
+// 订阅请求消息
+message TaskSubscription {
+  string taskName = 1;
+}
+
+// 订阅响应消息
+message SubscriptionResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// 更新配置请求消息
+message UpdateConfigRequest {
+  string publicKey = 1; // worker的公钥
+}
+
+// 更新配置响应消息
+message UpdateConfigResponse {
+  bool success = 1; // 更新是否成功
+  string message = 2; // 响应的消息或者错误信息
+}

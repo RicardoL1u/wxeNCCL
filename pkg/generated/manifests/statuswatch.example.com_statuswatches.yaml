@@ -41,9 +41,19 @@ spec:
             properties:
               number:
                 type: integer
+              serviceIP:
+                type: string
               workers:
                 items:
-                  type: string
+                  properties:
+                    grpcPort:
+                      type: string
+                    podUUID:
+                      type: string
+                  required:
+                  - grpcPort
+                  - podUUID
+                  type: object
                 type: array
             type: object
           status:
@@ -52,5 +62,3 @@ spec:
         type: object
     served: true
     storage: true
-    subresources:
-      status: {}
