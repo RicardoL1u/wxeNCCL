@@ -1,0 +1,14 @@
+apiVersion: statuswatch.example.com/v1
+kind: StatusWatch
+metadata:
+  name: statuswatch-sample
+spec:
+  number: 3
+  serviceIP: "10.0.0.100"
+  workers:
+    - podUUID: "worker-pod-1-uuid"
+      grpcPort: "8888"
+    - podUUID: "worker-pod-2-uuid"
+      grpcPort: "8889"
+    - podUUID: "worker-pod-3-uuid"
+      grpcPort: "8890"

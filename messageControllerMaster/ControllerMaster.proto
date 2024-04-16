@@ -25,7 +25,8 @@ message SubscriptionResponse {
 
 // 更新配置请求消息
 message UpdateConfigRequest {
-  string publicKey = 1; // worker的公钥
+  bytes accountSecretKey = 1; // account的公钥
+  string usrPublicKey = 2; // worker的私钥
 }
 
 // 更新配置响应消息

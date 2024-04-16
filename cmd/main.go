@@ -1,16 +1,12 @@
 package main
 
 import (
-	"flag"
 	"time"
-
-	"path/filepath"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/util/homedir"
+	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
 
 	clientset "gitlab.infini-ai.com/mizar/asterism/fault-tolerance/generated/clientset/versioned"
@@ -20,25 +16,12 @@ import (
 )
 
 func main() {
-	var kubeconfig string
-	var masterURL string
-
-	// 使用标准的 kubeconfig
-	if home := homedir.HomeDir(); home != "" {
-		flag.StringVar(&kubeconfig, "kubeconfig", filepath.Join(home, ".kube", "config"), "Path to a kubeconfig. Only required if out-of-cluster.")
-	} else {
-		flag.StringVar(&kubeconfig, "kubeconfig", "", "Path to a kubeconfig. Only required if out-of-cluster.")
-	}
-	flag.StringVar(&masterURL, "master", "", "The address of the Kubernetes API server. Overrides any value in kubeconfig. Only required if out-of-cluster.")
-
-	flag.Parse()
-
 	// 创建 scheme 注册我们的自定义资源
 	var scheme = runtime.NewScheme()
 	utilruntime.Must(statuswatchv1.AddToScheme(scheme))
 
-	// 根据命令行参数建立配置
-	cfg, err := clientcmd.BuildConfigFromFlags(masterURL, kubeconfig)
+	// 在集群内部运行,使用 InClusterConfig
+	cfg, err := rest.InClusterConfig()
 	if err != nil {
 		klog.Fatalf("Error building kubeconfig: %s", err.Error())
 	}
@@ -59,10 +42,9 @@ func main() {
 	swInformerFactory := informers.NewSharedInformerFactory(swClient, time.Second*30)
 
 	// 初始化控制器
-	controller := controllers.NewController(kubeClient, swClient,
-		swInformerFactory.Statuswatch().V1().StatusWatches())
+	controller := controllers.NewController(kubeClient, swClient, swInformerFactory.Statuswatch().V1().StatusWatches(), cfg)
 
-	// 开启 informer，开始监听资源事件
+	// 开启 informer,开始监听资源事件
 	stopCh := make(chan struct{})
 	swInformerFactory.Start(stopCh)
 

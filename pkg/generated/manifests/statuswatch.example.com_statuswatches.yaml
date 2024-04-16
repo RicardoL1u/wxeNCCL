@@ -46,13 +46,10 @@ spec:
               workers:
                 items:
                   properties:
-                    grpcPort:
+                    name:
                       type: string
                     podUUID:
                       type: string
-                  required:
-                  - grpcPort
-                  - podUUID
                   type: object
                 type: array
             type: object

@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.3.0
 // - protoc             v4.25.2
-// source: ControllerMaster.proto
+// source: messageControllerMaster/ControllerMaster.proto
 
 package __
 
@@ -146,5 +146,5 @@ var TaskManager_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "ControllerMaster.proto",
+	Metadata: "messageControllerMaster/ControllerMaster.proto",
 }

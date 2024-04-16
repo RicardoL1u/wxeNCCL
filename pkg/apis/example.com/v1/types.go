@@ -17,8 +17,8 @@ type StatusWatch struct {
 }
 
 type WorkerSpec struct {
-	PodUUID  string `json:"podUUID"`
-	GRPCPort string `json:"grpcPort"`
+	PodUUID string `json:"podUUID,omitempty"`
+	Name    string `json:"name,omitempty"`
 }
 
 // StatusWatchSpec defines the desired state of StatusWatch

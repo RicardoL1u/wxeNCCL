@@ -1,0 +1,67 @@
+# statuswatch-controller.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: statuswatch-controller
+  namespace: default
+  labels:
+    component: statuswatch-controller
+spec:
+  selector:
+    matchLabels:
+      component: statuswatch-controller
+  template:
+    metadata:
+      labels:
+        component: statuswatch-controller
+    spec:
+      serviceAccountName: statuswatch-controller-sa
+      containers:
+      - name: statuswatch-controller
+        image: fortypercent/master:v1.2.6
+        imagePullPolicy: IfNotPresent
+        command: ["./master-linux-arm"]
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: statuswatch-controller-sa
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: statuswatch-controller-clusterrole
+rules:
+- apiGroups: ["statuswatch.example.com"]
+  resources: ["statuswatches"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch", "update"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "update"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: statuswatch-controller-clusterrolebinding
+subjects:
+- kind: ServiceAccount
+  name: statuswatch-controller-sa
+  namespace: default
+roleRef:
+  kind: ClusterRole
+  name: statuswatch-controller-clusterrole
+  apiGroup: rbac.authorization.k8s.io
