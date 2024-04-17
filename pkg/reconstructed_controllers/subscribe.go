@@ -9,10 +9,11 @@ import (
 )
 
 // 初始化订阅
-func (c *Controller) InitializeSubscriptions(statuswatch *myappv1.StatusWatch, successfulACK int) {
+func (c *Controller) InitializeSubscriptions(statuswatch *myappv1.StatusWatch) {
 	workerTopic := c.formatWorkerTopic(statuswatch.Name)
+	successfulACK = 0
 	sub, err := c.natsConn.Subscribe(workerTopic, func(msg *nats.Msg) {
-		c.handleMessage(msg, statuswatch, successfulACK)
+		c.handleMessage(msg, statuswatch)
 	})
 	if err != nil {
 		log.Fatalf("Failed to subscribe to topic '%s': %v", workerTopic, err)

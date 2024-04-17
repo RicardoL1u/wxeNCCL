@@ -82,6 +82,8 @@ type Message struct {
 	Data    string `json:"Data"`
 }
 
+var successfulACK int
+
 // NewController returns a new sample controller
 func NewController(
 	kubeclientset kubernetes.Interface,
@@ -335,8 +337,7 @@ func (c *Controller) handleStatusWatchCreated(statuswatch *myappv1.StatusWatch) 
 		log.Printf("Failed during worker setup: %v", err)
 		return
 	}
-	successfulACK := 0
-	c.InitializeSubscriptions(statuswatch, successfulACK)
+	c.InitializeSubscriptions(statuswatch)
 	if c.verifyWorkerSubscriptions(statuswatch) {
 		c.publishReadyMessage(statuswatch.Name)
 	}

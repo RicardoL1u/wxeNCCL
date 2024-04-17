@@ -19,18 +19,18 @@ func init() {
 	rand.Seed(time.Now().UnixNano())
 }
 
-func (c *Controller) DecideAction(message Message, statuswatch *myappv1.StatusWatch, successfulACK int) {
+func (c *Controller) DecideAction(message Message, statuswatch *myappv1.StatusWatch) {
 	switch message.MsgType {
 	case "ACK":
-		c.processAck(message, statuswatch, successfulACK)
+		c.processAck(message, statuswatch)
 	case "error":
-		c.processError(message, statuswatch.Name, successfulACK)
+		c.processError(message, statuswatch.Name)
 	default:
 		log.Printf("Received unknown message type: %s", message.MsgType)
 	}
 }
 
-func (c *Controller) processAck(message Message, statuswatch *myappv1.StatusWatch, successfulACK int) {
+func (c *Controller) processAck(message Message, statuswatch *myappv1.StatusWatch) {
 	switch message.Data {
 	case "Warmup completed":
 		c.processWarmupCompletedACK(statuswatch, successfulACK)
@@ -41,17 +41,17 @@ func (c *Controller) processAck(message Message, statuswatch *myappv1.StatusWatc
 	}
 }
 
-func (c *Controller) processError(message Message, statusWatchName string, successfulACK int) {
+func (c *Controller) processError(message Message, statusWatchName string) {
 	log.Printf("Error received: %s", message.Data)
 	if !atomic.CompareAndSwapInt32(&c.processingError, 0, 1) {
 		log.Println("Error already being processed, skipping duplicate message.")
 		return
 	}
 	defer atomic.StoreInt32(&c.processingError, 0)
-	c.handleError(message.Data, statusWatchName, successfulACK)
+	c.handleError(message.Data, statusWatchName)
 }
 
-func (c *Controller) handleError(errorMsg string, statusWatchName string, successfulACK int) {
+func (c *Controller) handleError(errorMsg string, statusWatchName string) {
 	switch errorMsg {
 	case "Warmup failed", "Train task failed":
 		operation := map[string]string{
@@ -138,14 +138,14 @@ func (c *Controller) restartTask(stage, statusWatchName string) {
 	// 这里添加实际的任务重启逻辑
 }
 
-func (c *Controller) handleMessage(msg *nats.Msg, statuswatch *myappv1.StatusWatch, successfulACK int) {
+func (c *Controller) handleMessage(msg *nats.Msg, statuswatch *myappv1.StatusWatch) {
 	log.Printf("Received message from topic '%s'", msg.Subject)
 	var message Message
 	if err := json.Unmarshal(msg.Data, &message); err != nil {
 		log.Printf("Failed to unmarshal message: %v", err)
 		return
 	}
-	c.DecideAction(message, statuswatch, successfulACK)
+	c.DecideAction(message, statuswatch)
 }
 
 func (c *Controller) processWarmupCompletedACK(statuswatch *myappv1.StatusWatch, successfulSubscriptions int) int {
