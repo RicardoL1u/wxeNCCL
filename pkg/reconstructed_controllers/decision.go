@@ -24,7 +24,7 @@ func (c *Controller) DecideAction(message Message, statuswatch *myappv1.StatusWa
 	case "ACK":
 		c.processAck(message, statuswatch, successfulACK)
 	case "error":
-		c.processError(message, statuswatch.Name)
+		c.processError(message, statuswatch.Name, successfulACK)
 	default:
 		log.Printf("Received unknown message type: %s", message.MsgType)
 	}
@@ -33,7 +33,7 @@ func (c *Controller) DecideAction(message Message, statuswatch *myappv1.StatusWa
 func (c *Controller) processAck(message Message, statuswatch *myappv1.StatusWatch, successfulACK int) {
 	switch message.Data {
 	case "Warmup completed":
-		successfulACK = c.processWarmupCompletedACK(statuswatch, successfulACK)
+		c.processWarmupCompletedACK(statuswatch, successfulACK)
 	case "Train completed successfully":
 		log.Printf("Training completed successfully for task: %s", statuswatch.Name)
 	default:
@@ -41,23 +41,24 @@ func (c *Controller) processAck(message Message, statuswatch *myappv1.StatusWatc
 	}
 }
 
-func (c *Controller) processError(message Message, statusWatchName string) {
+func (c *Controller) processError(message Message, statusWatchName string, successfulACK int) {
 	log.Printf("Error received: %s", message.Data)
 	if !atomic.CompareAndSwapInt32(&c.processingError, 0, 1) {
 		log.Println("Error already being processed, skipping duplicate message.")
 		return
 	}
 	defer atomic.StoreInt32(&c.processingError, 0)
-	c.handleError(message.Data, statusWatchName)
+	c.handleError(message.Data, statusWatchName, successfulACK)
 }
 
-func (c *Controller) handleError(errorMsg string, statusWatchName string) {
+func (c *Controller) handleError(errorMsg string, statusWatchName string, successfulACK int) {
 	switch errorMsg {
 	case "Warmup failed", "Train task failed":
 		operation := map[string]string{
 			"Warmup failed":     "Warmup",
 			"Train task failed": "Train",
 		}[errorMsg]
+		successfulACK = 0
 		c.stopAllWorkers(operation, statusWatchName)
 		log.Printf("%s detected. Starting diagnostics...", errorMsg)
 		time.Sleep(10 * time.Second)

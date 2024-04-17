@@ -335,7 +335,8 @@ func (c *Controller) handleStatusWatchCreated(statuswatch *myappv1.StatusWatch) 
 		log.Printf("Failed during worker setup: %v", err)
 		return
 	}
-	c.InitializeSubscriptions(statuswatch)
+	successfulACK := 0
+	c.InitializeSubscriptions(statuswatch, successfulACK)
 	if c.verifyWorkerSubscriptions(statuswatch) {
 		c.publishReadyMessage(statuswatch.Name)
 	}
