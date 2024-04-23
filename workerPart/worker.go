@@ -40,14 +40,16 @@ type server struct {
 	natsConn      *nats.Conn
 	sub           *nats.Subscription
 	natsConnected chan bool
+	clientset     *kubernetes.Clientset
 }
 
 var (
 	accountSeed   []byte
 	userPublicKey string
 	mutex         sync.RWMutex
-	ctx           context.Context
+	PodError      bool
 	cancel        context.CancelFunc
+	podName       string
 )
 
 // func getPort() (int32, error) {
@@ -96,14 +98,16 @@ func (s *server) startGRPCServer(natsConnChan chan *nats.Conn, taskName string) 
 	// 获取 gRPC 端口
 	port := os.Getenv("GRPC_PORT")
 	if port == "" {
-		// 如果环境变量中没有设置端口,使用一个默认值
+		port = "50051" //使用默认端口
 		log.Printf("GRPC_PORT not set, using default: %s", port)
+		return
 	}
 
 	// 创建 gRPC 服务器
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%s", port))
 	if err != nil {
-		log.Fatalf("failed to listen: %v", err)
+		log.Printf("failed to listen: %v", err)
+		return
 	}
 
 	grpcServer := grpc.NewServer()
@@ -160,7 +164,7 @@ func (s *server) startGRPCServer(natsConnChan chan *nats.Conn, taskName string) 
 	}
 
 	// 创建 NATS 连接选项
-	podName := os.Getenv("POD_NAME")
+	podName = os.Getenv("POD_NAME")
 	opts := []nats.Option{
 		nats.Name(podName),
 		nats.Token(jwtString),
@@ -199,54 +203,61 @@ func generateNATSJWT(userPublicKey string, taskName string) *jwt.UserClaims {
 }
 
 func main() {
-	// 获取 Pod 的名称
-	podName := os.Getenv("POD_NAME")
+	// Get Pod name from environment variable
+	podName = os.Getenv("POD_NAME") // 使用全局变量，移除:=
 	if podName == "" {
-		log.Fatalf("POD_NAME environment variable not set")
+		log.Println("POD_NAME environment variable not set")
+		return
 	}
 
-	// 从 Pod 名称中提取 taskName
-	parts := strings.Split(podName, "-")
-	if len(parts) < 2 {
-		log.Fatalf("Invalid Pod name format: %s", podName)
+	// Extract task name from Pod name
+	parts := strings.SplitN(podName, "-", 2)
+	if len(parts) != 2 {
+		log.Printf("Invalid Pod name format: %s\n", podName)
+		return
 	}
 	taskName := parts[0]
-	log.Printf("Task name: %s", taskName)
+	log.Printf("Task name: %s\n", taskName)
 
-	// 创建一个可取消的 context
-	ctx, cancel = context.WithCancel(context.Background())
+	// Create a cancellable context
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 创建 server 实例
+	// Create server instance
 	s := &server{
 		natsConnected: make(chan bool),
 	}
 
-	// 启动 gRPC 服务器
-	natsConnChan := make(chan *nats.Conn)
+	// Start gRPC server in a separate goroutine
+	natsConnChan := make(chan *nats.Conn) // 定义一个通道来传递NATS连接
 	go s.startGRPCServer(natsConnChan, taskName)
 
-	// 等待 NATS 连接建立或 context 取消
+	// Wait for NATS connection establishment or context cancellation
 	select {
 	case s.natsConn = <-natsConnChan:
 		log.Println("NATS connection established")
 		defer s.natsConn.Close()
 	case <-ctx.Done():
-		log.Println("Context canceled, exiting...")
-		return
+		if PodError {
+			log.Println("Pod error, exiting...")
+			os.Exit(1)
+		} else {
+			log.Println("Context canceled, exiting...")
+			return
+		}
 	}
 
-	// 创建一个可取消的 context,当收到终止信号时自动取消
-	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	// Create a cancellable context for signal handling
+	signalCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// 等待 context 取消
-	<-ctx.Done()
+	// Wait for context cancellation
+	<-signalCtx.Done()
 	log.Println("Received termination signal, exiting...")
 }
 
 func (s *server) SubscribeToTask(ctx context.Context, req *pb.TaskSubscription) (*pb.SubscriptionResponse, error) {
-	<-s.natsConnected
+	fmt.Println(<-s.natsConnected)
 	taskName := req.TaskName
 	log.Printf("Received task subscription request for task: %s", taskName)
 
@@ -255,12 +266,18 @@ func (s *server) SubscribeToTask(ctx context.Context, req *pb.TaskSubscription) 
 	taskSubscription := subscription + "-master"
 	log.Printf("Subscribing to task: %s", taskSubscription)
 
+	if s.sub != nil {
+		log.Printf("Already subscribed to task: %s, skipping new subscription", taskSubscription)
+		return &pb.SubscriptionResponse{Success: false, Message: "Already subscribed"}, nil
+	}
+
 	// 订阅任务消息
 	sub, err := s.natsConn.Subscribe(taskSubscription, s.handleTaskMessage(taskName))
 	if err != nil {
 		log.Printf("Failed to subscribe to task: %v", err)
 		return &pb.SubscriptionResponse{Success: false, Message: "Failed to subscribe to task"}, nil
 	}
+
 	s.sub = sub
 
 	log.Printf("Subscribed to task: %s", taskSubscription)
@@ -276,57 +293,68 @@ func extractSubscriptionName(taskName string) string {
 }
 
 func (s *server) handleTaskMessage(taskName string) func(msg *nats.Msg) {
+	callCount := 0
+	var temp *nats.Msg
 	return func(msg *nats.Msg) {
-		var message Message
-		err := json.Unmarshal(msg.Data, &message)
-		if err != nil {
-			log.Printf("Failed to unmarshal message: %v", err)
-			return
-		}
+		if temp != nil && temp == msg {
 
-		fmt.Printf("Received message: %v\n", message)
-		if message.MsgType == "order" {
-			log.Printf("Received order message for task: %s", taskName)
-			// 判断是否为停止工作的消息
-			if strings.HasPrefix(message.Data, "Stop all workers") {
-				// 解析消息以提取stage和status
-				parts := strings.Split(message.Data, ":")
-				if len(parts) == 3 { // 确保消息格式正确
-					stage := strings.TrimSpace(parts[1])
-					task := strings.TrimSpace(parts[2])
-					log.Printf("Received stop message for task: %s, stage: %s, task: %s", taskName, stage, task)
-					// 这里调用停止工作线程的处理函数
-					s.handleStopWorkersMessage(taskName, stage, task)
+		} else {
+			temp = msg
+			callCount++
+			fmt.Printf("闭包被调用了 %d 次, 处理来自任务 %s 的消息\n", callCount, taskName)
+			var message Message
+			err := json.Unmarshal(msg.Data, &message)
+			if err != nil {
+				log.Printf("Failed to unmarshal message: %v", err)
+				return
+			}
+			fmt.Printf("Received message: %v\n", message)
+			if message.MsgType == "order" {
+				log.Printf("Received order message for task: %s", taskName)
+				// 判断是否为停止工作的消息
+				if strings.HasPrefix(message.Data, "Stop all workers") {
+					// 解析消息以提取stage和status
+					parts := strings.Split(message.Data, ":")
+					if len(parts) == 3 { // 确保消息格式正确
+						stage := strings.TrimSpace(parts[1])
+						task := strings.TrimSpace(parts[2])
+						log.Printf("Received stop message for task: %s, stage: %s, task: %s", taskName, stage, task)
+						// 这里调用停止工作线程的处理函数
+						s.handleStopWorkersMessage(taskName, stage, task)
+					} else {
+						log.Printf("Invalid stop message format for task: %s", taskName)
+					}
+				} else if strings.HasPrefix(message.Data, "restart:") {
+					// 以下是重启相关消息的处理逻辑
+					stage := strings.TrimSpace(strings.Split(message.Data, ": ")[1])
+					log.Println(stage)
+					switch stage {
+					case "Warmup":
+						log.Printf("Received restart warmup message for task: %s", taskName)
+						// 这里调用重启warmup的处理函数
+						go s.handleWarmupMessage(taskName, message)
+					case "Train":
+						log.Printf("Received restart train message for task: %s", taskName)
+						// 这里调用重启train的处理函数
+						go s.handleTrainStartMessage(taskName)
+					default:
+						log.Printf("Received unknown restart message for task: %s, stage: %s", taskName, stage)
+					}
 				} else {
-					log.Printf("Invalid stop message format for task: %s", taskName)
-				}
-			} else if strings.HasPrefix(message.Data, "restart:") {
-				// 以下是重启相关消息的处理逻辑
-				stage := strings.TrimSpace(strings.Split(message.Data, ": ")[1])
-				log.Println(stage)
-				switch stage {
-				case "Warmup":
-					log.Printf("Received restart warmup message for task: %s", taskName)
-					// 这里调用重启warmup的处理函数
-					go s.handleWarmupMessage(taskName, message)
-				case "Train":
-					log.Printf("Received restart train message for task: %s", taskName)
-					// 这里调用重启train的处理函数
-					go s.handleTrainStartMessage(taskName, message)
-				default:
-					log.Printf("Received unknown restart message for task: %s, stage: %s", taskName, stage)
-				}
-			} else {
-				// 处理其他类型的消息
-				switch message.Data {
-				case "warmup":
-					go s.handleWarmupMessage(taskName, message)
-				case "train start":
-					go s.handleTrainStartMessage(taskName, message)
-				case "retrain":
-					log.Printf("Received retrain message for task: %s", taskName)
-					go s.handleWarmupMessage(taskName, message)
-					//s.handleRetrainMessage() // 确保这个函数名称正确反映了它的作用
+					// 处理其他类型的消息
+					switch message.Data {
+					case "warmup":
+						go s.handleWarmupMessage(taskName, message)
+					case "train start":
+						go s.handleTrainStartMessage(taskName)
+					case "retrain":
+						log.Printf("Received retrain message for task: %s", taskName)
+						go s.handleWarmupMessage(taskName, message)
+						//s.handleRetrainMessage() //
+					case "exit":
+						log.Printf("Received exit message for task: %s", taskName)
+						go s.exitWorkerProcessAndPod(taskName, message)
+					}
 				}
 			}
 		}
@@ -381,9 +409,9 @@ func (s *server) handleStopWorkersMessage(taskName, stage, task string) {
 	}
 }
 
-func (s *server) handleTrainStartMessage(taskName string, message Message) {
+func (s *server) handleTrainStartMessage(taskName string) {
 	output, success := s.runTrainScript()
-	responseMsg := s.createResponseMessage(message, success, output)
+	responseMsg := s.createResponseMessage(success, podName)
 	workerTopic := extractSubscriptionName(taskName) + "-worker"
 	err := s.publishToNATS(workerTopic, responseMsg)
 	if err != nil {
@@ -394,14 +422,14 @@ func (s *server) handleTrainStartMessage(taskName string, message Message) {
 	log.Printf("Message published to %s", workerTopic)
 
 	if success {
-		log.Printf("Train completed successfully. Terminating worker process and pod.")
+		log.Println("Train completed successfully. Terminating worker process and pod.")
 		s.terminateWorkerProcessAndPod()
 	} else {
 		log.Printf("Train failed with output: %s", output)
 	}
 }
 
-func (s *server) createResponseMessage(message Message, success bool, output string) Message {
+func (s *server) createResponseMessage(success bool, podName string) Message {
 	msgType := "ACK"
 	data := "Train completed successfully"
 	if !success {
@@ -411,33 +439,90 @@ func (s *server) createResponseMessage(message Message, success bool, output str
 	}
 
 	return Message{
-		ID:      message.ID, //这个id应该是pod的name，不是nats的id
+		ID:      podName, //这个id应该是pod的name，不是nats的id
 		Time:    time.Now().Format(time.RFC3339),
 		MsgType: msgType,
 		Data:    data,
 	}
 }
 
-func (s *server) terminateWorkerProcessAndPod() {
-	s.sub.Unsubscribe()
-	// 检查 Pod 的状态
-	podName := os.Getenv("POD_NAME")
-	if podName == "" {
-		log.Fatalf("POD_NAME environment variable not set")
+func (s *server) exitWorkerProcessAndPod(taskName string, message Message) {
+	// Check if we need to terminate the worker process and Pod
+	if message.ID == podName {
+		log.Printf("Received exit message for task: %s, terminating worker process and Pod", taskName)
+		s.terminateOneWorker(taskName)
 	}
+}
+
+func (s *server) terminateOneWorker(taskName string) {
+	// 使用 defer 来确保订阅最终会被取消
+	defer func() {
+		if err := s.sub.Unsubscribe(); err != nil {
+			log.Printf("Failed to unsubscribe: %v", err)
+		}
+	}()
 
 	// 创建 Kubernetes 客户端
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		log.Fatalf("Failed to create in-cluster config: %v", err)
 	}
-	clientset, err := kubernetes.NewForConfig(config)
+	s.clientset, err = kubernetes.NewForConfig(config)
 	if err != nil {
 		log.Fatalf("Failed to create Kubernetes clientset: %v", err)
 	}
 
 	// 获取当前 Pod 对象
-	pod, err := clientset.CoreV1().Pods("default").Get(context.Background(), podName, metav1.GetOptions{})
+	pod, err := s.clientset.CoreV1().Pods("kubeflow").Get(context.Background(), podName, metav1.GetOptions{})
+	if err != nil {
+		log.Fatalf("Failed to get Pod: %v", err)
+	}
+
+	// 检查 Pod 的状态
+	if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+		log.Printf("Pod is already in %s state, no need to terminate", pod.Status.Phase)
+		return
+	}
+	// Prepare a response message
+	responseMsg := Message{
+		ID:      podName,
+		Time:    time.Now().Format(time.RFC3339),
+		MsgType: "ACK",
+		Data:    "Pod exits successfully",
+	}
+	workerTopic := extractSubscriptionName(taskName) + "-worker"
+	err = s.publishToNATS(workerTopic, responseMsg)
+	if err != nil {
+		log.Printf("Failed to publish message to %s: %v", workerTopic, err)
+		return
+	}
+	// 终止 worker 进程
+	log.Println("Terminating worker process...")
+	PodError = true
+	cancel() // 取消 context,停止主进程
+}
+
+func (s *server) terminateWorkerProcessAndPod() {
+	fmt.Println("terminateWorkerProcessAndPod")
+	if err := s.sub.Unsubscribe(); err != nil {
+		// Handle the error, perhaps logging it or taking corrective action
+		log.Printf("Failed to unsubscribe: %v", err)
+		// Decide whether to return the error or handle it differently
+		return
+	} else {
+		log.Println("Unsubscribed successfully")
+	}
+	fmt.Println("Unsubscribed")
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		log.Fatalf("Failed to create in-cluster config: %v", err)
+	}
+	s.clientset, err = kubernetes.NewForConfig(config)
+	if err != nil {
+		log.Fatalf("Failed to create Kubernetes clientset: %v", err)
+	}
+	// 获取当前 Pod 对象
+	pod, err := s.clientset.CoreV1().Pods("kubeflow").Get(context.Background(), podName, metav1.GetOptions{})
 	if err != nil {
 		log.Fatalf("Failed to get Pod: %v", err)
 	}
@@ -450,17 +535,10 @@ func (s *server) terminateWorkerProcessAndPod() {
 
 	// 终止 worker 进程
 	log.Println("Terminating worker process...")
-	cancel() // 取消 context,停止主进程
+	cancel() // 取消 context, 停止主进程
 
-	pod.Status.Phase = corev1.PodSucceeded
-	// 如果任务已经完成,将 Pod 状态更新为 Succeeded,否则更新为 Failed
-
-	_, err = clientset.CoreV1().Pods(os.Getenv("POD_NAMESPACE")).UpdateStatus(context.Background(), pod, metav1.UpdateOptions{})
-	if err != nil {
-		log.Fatalf("Failed to update Pod status: %v", err)
-	}
-
-	log.Printf("Worker process terminated and Pod status updated to %s", pod.Status.Phase)
+	// 此处不需要更新 Pod 状态，Kubernetes 会根据容器退出代码自动更新
+	log.Println("Worker process is scheduled for termination.")
 }
 
 func (s *server) runTrainScript() (string, bool) {
@@ -488,8 +566,9 @@ func (s *server) runTrainScript() (string, bool) {
 func (s *server) handleWarmupMessage(taskName string, message Message) {
 	success := s.runWarmupScript()
 	responseMsg := s.createWarmupResponseMessage(message, success)
-
+	fmt.Println("responseMsg", responseMsg)
 	workerTopic := extractSubscriptionName(taskName) + "-worker"
+	fmt.Println("workerTopic", workerTopic)
 	err := s.publishToNATS(workerTopic, responseMsg)
 	if err != nil {
 		log.Printf("Failed to publish warmup response message to %s: %v", workerTopic, err)
@@ -543,6 +622,7 @@ func (s *server) runWarmupScript() bool {
 // 2. pod挂掉的时候，他的grpc就会挂掉，然后订阅就会结束
 
 func (s *server) publishToNATS(topic string, msg Message) error {
+	fmt.Println("msg", msg)
 	// 序列化消息
 	msgData, err := json.Marshal(msg)
 	if err != nil {
@@ -553,9 +633,10 @@ func (s *server) publishToNATS(topic string, msg Message) error {
 	err = s.natsConn.Publish(topic, msgData)
 	if err != nil {
 		return fmt.Errorf("failed to publish message to %s: %v", topic, err)
+	} else {
+		fmt.Println("published")
+		return nil
 	}
-
-	return nil
 }
 
 func (s *server) UpdateWorkerConfig(ctx context.Context, req *pb.UpdateConfigRequest) (*pb.UpdateConfigResponse, error) {
@@ -580,5 +661,3 @@ func (s *server) updateAccountConfig(req *pb.UpdateConfigRequest) {
 
 	log.Printf("Updated account config with secret key: %s, public key: %s", req.AccountSecretKey, req.UsrPublicKey)
 }
-
-// Compare this snippet from workerPart/worker.go:
