@@ -3,7 +3,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: statuswatch-controller
-  namespace: default
+  namespace: kubeflow
   labels:
     component: statuswatch-controller
 spec:
@@ -18,7 +18,7 @@ spec:
       serviceAccountName: statuswatch-controller-sa
       containers:
       - name: statuswatch-controller
-        image: fortypercent/master:v1.2.6
+        image: fortypercent/master:v1.4.6
         imagePullPolicy: IfNotPresent
         command: ["./master-linux-arm"]
         resources:
@@ -33,7 +33,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: statuswatch-controller-sa
-  namespace: default
+  namespace: kubeflow
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -60,7 +60,7 @@ metadata:
 subjects:
 - kind: ServiceAccount
   name: statuswatch-controller-sa
-  namespace: default
+  namespace: kubeflow
 roleRef:
   kind: ClusterRole
   name: statuswatch-controller-clusterrole

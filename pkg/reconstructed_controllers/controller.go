@@ -22,6 +22,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -72,7 +73,8 @@ type Controller struct {
 	workqueue workqueue.RateLimitingInterface
 	// recorder is an event recorder for recording Event resources to the
 	// Kubernetes API.
-	recorder record.EventRecorder
+	recorder      record.EventRecorder
+	lastErrorTime atomic.Value
 }
 
 type Message struct {
@@ -275,6 +277,7 @@ func (c *Controller) processNextWorkItem() bool {
 func (c *Controller) syncHandler(key string) error {
 	// Convert the namespace/name string into a distinct namespace and name
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
+	fmt.Println(namespace, name)
 	if err != nil {
 		utilruntime.HandleError(fmt.Errorf("invalid resource key: %s", key))
 		return nil
@@ -331,14 +334,17 @@ func findUpdates(oldWorkers map[string]myappv1.WorkerSpec, newWorkers []myappv1.
 }
 
 func (c *Controller) handleStatusWatchCreated(statuswatch *myappv1.StatusWatch) {
+	fmt.Println(statuswatch, "created", statuswatch.Namespace)
 	fmt.Printf("Number of workers: %d\n", statuswatch.Spec.Number)
 
 	if err := c.setupWorkers(statuswatch); err != nil {
 		log.Printf("Failed during worker setup: %v", err)
 		return
 	}
-	c.InitializeSubscriptions(statuswatch)
-	if c.verifyWorkerSubscriptions(statuswatch) {
+	if err := c.InitializeSubscriptions(statuswatch); err != nil {
+		log.Printf("Failed to initialize subscriptions: %v", err)
+		return
+	} else {
 		c.publishReadyMessage(statuswatch.Name)
 	}
 }
@@ -358,10 +364,6 @@ func (c *Controller) setupWorkers(statuswatch *myappv1.StatusWatch) error {
 	}
 
 	return nil
-}
-
-func (c *Controller) verifyWorkerSubscriptions(statuswatch *myappv1.StatusWatch) bool {
-	return c.connectAndSubscribeWorkers(statuswatch, nil, nil, nil) == int(statuswatch.Spec.Number)
 }
 
 func (c *Controller) handleStatusWatchDeleted(name string) {

@@ -1,7 +1,21 @@
+/*
+Copyright 2017 The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+	http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 package reconstructed_controllers
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -11,15 +25,17 @@ import (
 
 	"github.com/nats-io/nats.go"
 	myappv1 "gitlab.infini-ai.com/mizar/asterism/fault-tolerance/pkg/apis/example.com/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+var ackCh chan bool
 
 func init() {
 	rand.Seed(time.Now().UnixNano())
+	ackCh = make(chan bool)
 }
 
 func (c *Controller) DecideAction(message Message, statuswatch *myappv1.StatusWatch) {
+	fmt.Println("message.MsgType", message.MsgType)
 	switch message.MsgType {
 	case "ACK":
 		c.processAck(message, statuswatch)
@@ -31,11 +47,17 @@ func (c *Controller) DecideAction(message Message, statuswatch *myappv1.StatusWa
 }
 
 func (c *Controller) processAck(message Message, statuswatch *myappv1.StatusWatch) {
+
 	switch message.Data {
 	case "Warmup completed":
-		c.processWarmupCompletedACK(statuswatch, successfulACK)
+		fmt.Println("Warmup completed ACK received")
+		fmt.Println(message)
+		c.processWarmupCompletedACK(statuswatch)
 	case "Train completed successfully":
 		log.Printf("Training completed successfully for task: %s", statuswatch.Name)
+	case "Pod exits successfully":
+		log.Printf("Pod exits successfully for task: %s", statuswatch.Name)
+		ackCh <- true
 	default:
 		log.Printf("Unhandled ACK data: %s", message.Data)
 	}
@@ -43,11 +65,34 @@ func (c *Controller) processAck(message Message, statuswatch *myappv1.StatusWatc
 
 func (c *Controller) processError(message Message, statusWatchName string) {
 	log.Printf("Error received: %s", message.Data)
+
+	// 解析消息时间
+	msgTime, err := time.Parse(time.RFC3339, message.Time)
+	if err != nil {
+		log.Printf("Failed to parse message time: %v", err)
+		return
+	}
+
+	// 从atomic.Value获取最后一次错误时间
+	lastProcTimeVal := c.lastErrorTime.Load()
+	fmt.Println("lastProcTimeVal", lastProcTimeVal)
+	if lastProcTimeVal != nil {
+		lastProcTime := lastProcTimeVal.(time.Time)
+		if lastProcTime.Equal(msgTime) {
+			log.Println("Error already processed for this timestamp, skipping.")
+			return
+		}
+	}
+
+	// 如果消息时间不同，更新最后错误时间并处理错误
+	c.lastErrorTime.Store(msgTime)
+
 	if !atomic.CompareAndSwapInt32(&c.processingError, 0, 1) {
 		log.Println("Error already being processed, skipping duplicate message.")
 		return
 	}
 	defer atomic.StoreInt32(&c.processingError, 0)
+
 	c.handleError(message.Data, statusWatchName)
 }
 
@@ -84,10 +129,9 @@ func (c *Controller) handleDiagnostics(stage, statusWatchName string) {
 			log.Printf("Failed to get random pod name for %s diagnostics: %v", stage, err)
 			return
 		}
-		log.Printf("%s diagnostics failed. Cleaning up pod: %s", stage, podName)
-		if err := c.cleanUpPod(podName); err != nil {
-			log.Printf("Failed to clean up pod %s: %v", podName, err)
-		}
+		log.Printf("%s diagnostics finds error pod. Cleaning up pod: %s", stage, podName)
+		c.cleanUpPod(statusWatchName, podName)
+
 	} else {
 		log.Printf("%s diagnostics passed. No action required.", stage)
 		c.restartTask(stage, statusWatchName)
@@ -95,40 +139,31 @@ func (c *Controller) handleDiagnostics(stage, statusWatchName string) {
 }
 
 func (c *Controller) getRandomPodName(statusWatchName string) (string, error) {
-	sw, err := c.kubeclientset.CoreV1().Pods("default").Get(context.TODO(), statusWatchName, v1.GetOptions{})
+	// 使用lister从缓存中获取StatusWatch对象
+	sw, err := c.swLister.StatusWatches("kubeflow").Get(statusWatchName)
 	if err != nil {
 		return "", fmt.Errorf("failed to get StatusWatch %s: %v", statusWatchName, err)
 	}
 
-	if len(sw.Spec.Containers) == 0 {
-		return "", fmt.Errorf("no workers found in pod %s", statusWatchName)
+	// 检查是否有workers定义
+	if len(sw.Spec.Workers) == 0 {
+		return "", fmt.Errorf("no workers found in StatusWatch %s", statusWatchName)
 	}
 
-	// 从 Workers 列表中随机选择一个 Pod 名字
-	return sw.Spec.Containers[rand.Intn(len(sw.Spec.Containers))].Name, nil
+	// 从workers列表中随机选择一个
+	rand.Seed(time.Now().UnixNano()) // 确保随机性
+	randomIndex := rand.Intn(len(sw.Spec.Workers))
+	randomWorker := sw.Spec.Workers[randomIndex]
+
+	return randomWorker.Name, nil
 }
 
-func (c *Controller) cleanUpPod(podName string) error {
+func (c *Controller) cleanUpPod(statusWatchName, podName string) {
 	//TODO: 适配联想
 	log.Printf("Cleaning up pod %s in the default namespace...", podName)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	err := c.kubeclientset.CoreV1().Pods("default").Delete(ctx, podName, v1.DeleteOptions{})
-	if err != nil {
-		if errors.IsNotFound(err) {
-			// If the pod is not found, it's not necessarily an error in some contexts.
-			log.Printf("Pod %s not found, no need to clean up.", podName)
-			return nil // Return nil as it's not an error that should impact further processing.
-		}
-
-		// Log the error and return it so that callers can handle it if necessary.
-		log.Printf("Failed to delete pod %s in the default namespace: %v", podName, err)
-		return fmt.Errorf("failed to delete pod %s: %w", podName, err)
-	}
-
-	log.Printf("Pod %s in the default namespace cleaned up successfully", podName)
-	return nil
+	c.publishQuitMessage(statusWatchName, podName)
+	<-ackCh
+	log.Printf("Pod %s cleaned up successfully", podName)
 }
 
 // 重启任务函数
@@ -148,16 +183,17 @@ func (c *Controller) handleMessage(msg *nats.Msg, statuswatch *myappv1.StatusWat
 	c.DecideAction(message, statuswatch)
 }
 
-func (c *Controller) processWarmupCompletedACK(statuswatch *myappv1.StatusWatch, successfulSubscriptions int) int {
+func (c *Controller) processWarmupCompletedACK(statuswatch *myappv1.StatusWatch) int {
 	//TODO: 细化ACK是从哪个worker发来的
-	successfulSubscriptions++
-	log.Printf("Received ACK from worker. Total ACKs: %d", successfulSubscriptions)
+	successfulACK++
+
+	log.Printf("Received ACK from worker. Total ACKs: %d", successfulACK)
 
 	// 检查是否达到了StatusWatch中指定的worker数量
-	if successfulSubscriptions == int(statuswatch.Spec.Number) {
+	if successfulACK == int(statuswatch.Spec.Number) {
 		log.Println("Warmup completed for all workers")
 		log.Println("Starting training...")
 		c.publishTrainMessage(statuswatch.Name)
 	}
-	return successfulSubscriptions
+	return successfulACK
 }

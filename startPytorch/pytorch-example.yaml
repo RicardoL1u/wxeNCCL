@@ -1,0 +1,16 @@
+apiVersion: "kubeflow.org/v1"
+kind: "PyTorchJob"
+metadata:
+  name: "pytorchjob-example"
+spec:
+  pytorchReplicaSpecs:
+    Worker:
+      replicas: 4
+      restartPolicy: OnFailure
+      template:
+        spec:
+          containers:
+            - name: pytorch
+              image: fortypercent/init:v0.1.8
+              command: ["sleep"]
+              args: ["3600"]  # 让 pod sleep 一个小时

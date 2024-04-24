@@ -41,6 +41,9 @@ type server struct {
 	sub           *nats.Subscription
 	natsConnected chan bool
 	clientset     *kubernetes.Clientset
+	cancel        context.CancelFunc
+	formattedIP   string
+	podName       string
 }
 
 var (
@@ -48,8 +51,6 @@ var (
 	userPublicKey string
 	mutex         sync.RWMutex
 	PodError      bool
-	cancel        context.CancelFunc
-	podName       string
 )
 
 // func getPort() (int32, error) {
@@ -118,6 +119,7 @@ func (s *server) startGRPCServer(natsConnChan chan *nats.Conn, taskName string) 
 	if err != nil {
 		log.Fatalf("failed to get hostname: %v", err)
 	}
+	fmt.Println("hostname", hostname)
 	// 获取 headless service 的名称
 	headlessService := os.Getenv("HEADLESS_SERVICE_NAME")
 	if headlessService == "" {
@@ -149,7 +151,7 @@ func (s *server) startGRPCServer(natsConnChan chan *nats.Conn, taskName string) 
 
 	// 生成 NATS JWT
 	log.Println("Generating NATS JWT...")
-	natsJWT := generateNATSJWT(userPublicKey, taskName)
+	natsJWT := s.generateNATSJWT(userPublicKey, taskName)
 
 	// 从 accountSeed 恢复账号密钥对
 	akp, err := nkeys.FromSeed(accountSeed)
@@ -163,10 +165,10 @@ func (s *server) startGRPCServer(natsConnChan chan *nats.Conn, taskName string) 
 		log.Fatalf("Failed to encode NATS JWT: %v", err)
 	}
 
-	// 创建 NATS 连接选项
-	podName = os.Getenv("POD_NAME")
+	// // 创建 NATS 连接选项
+	// podName = os.Getenv("POD_NAME")
 	opts := []nats.Option{
-		nats.Name(podName),
+		nats.Name(s.podName),
 		nats.Token(jwtString),
 	}
 
@@ -185,14 +187,14 @@ func (s *server) startGRPCServer(natsConnChan chan *nats.Conn, taskName string) 
 	natsConnChan <- nc
 }
 
-func generateNATSJWT(userPublicKey string, taskName string) *jwt.UserClaims {
+func (s *server) generateNATSJWT(userPublicKey string, taskName string) *jwt.UserClaims {
 	// 获取 Pod 的名称
 	log.Printf("Generating JWT for task: %s", taskName)
-	podName := os.Getenv("POD_NAME")
+	// podName := os.Getenv("POD_NAME")
 
 	// 创建用户的 JWT
 	userJwt := jwt.NewUserClaims(userPublicKey)
-	userJwt.Name = podName
+	userJwt.Name = s.podName
 	userJwt.Expires = time.Now().Add(time.Hour * 24 * 365).Unix()
 
 	// 设置用户的权限和订阅
@@ -203,55 +205,68 @@ func generateNATSJWT(userPublicKey string, taskName string) *jwt.UserClaims {
 }
 
 func main() {
-	// Get Pod name from environment variable
-	podName = os.Getenv("POD_NAME") // 使用全局变量，移除:=
-	if podName == "" {
-		log.Println("POD_NAME environment variable not set")
-		return
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		log.Fatalf("Failed to create in-cluster config: %v", err)
 	}
 
-	// Extract task name from Pod name
+	podName := os.Getenv("POD_NAME")
+	if podName == "" {
+		log.Fatal("POD_NAME environment variable not set")
+	}
+
 	parts := strings.SplitN(podName, "-", 2)
-	if len(parts) != 2 {
-		log.Printf("Invalid Pod name format: %s\n", podName)
-		return
+	if len(parts) < 2 {
+		log.Fatalf("Invalid Pod name format: %s", podName)
 	}
 	taskName := parts[0]
-	log.Printf("Task name: %s\n", taskName)
+	namespace := "kubeflow"
 
-	// Create a cancellable context
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		log.Fatalf("Failed to create Kubernetes clientset: %v", err)
+	}
+
+	pod, err := clientset.CoreV1().Pods(namespace).Get(context.TODO(), podName, metav1.GetOptions{})
+	if err != nil {
+		log.Fatalf("Failed to get pod: %v", err)
+	}
+
+	podIP := pod.Status.PodIP
+	if podIP == "" {
+		log.Fatal("Pod IP not available")
+	}
+
+	fmt.Println("podIP", podIP)
+	formattedIP := strings.ReplaceAll(podIP, ".", "-")
+	fmt.Println("formattedIP", formattedIP)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Create server instance
 	s := &server{
+		clientset:     clientset,
 		natsConnected: make(chan bool),
+		cancel:        cancel,
+		formattedIP:   formattedIP,
+		podName:       podName,
 	}
 
-	// Start gRPC server in a separate goroutine
-	natsConnChan := make(chan *nats.Conn) // 定义一个通道来传递NATS连接
+	natsConnChan := make(chan *nats.Conn)
 	go s.startGRPCServer(natsConnChan, taskName)
 
-	// Wait for NATS connection establishment or context cancellation
 	select {
 	case s.natsConn = <-natsConnChan:
 		log.Println("NATS connection established")
 		defer s.natsConn.Close()
 	case <-ctx.Done():
-		if PodError {
-			log.Println("Pod error, exiting...")
-			os.Exit(1)
-		} else {
-			log.Println("Context canceled, exiting...")
-			return
-		}
+		log.Println("Context canceled, exiting...")
+		return
 	}
 
-	// Create a cancellable context for signal handling
 	signalCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Wait for context cancellation
 	<-signalCtx.Done()
 	log.Println("Received termination signal, exiting...")
 }
@@ -299,6 +314,8 @@ func (s *server) handleTaskMessage(taskName string) func(msg *nats.Msg) {
 		if temp != nil && temp == msg {
 
 		} else {
+			fmt.Println("msg", msg)
+			fmt.Println("temp", temp)
 			temp = msg
 			callCount++
 			fmt.Printf("闭包被调用了 %d 次, 处理来自任务 %s 的消息\n", callCount, taskName)
@@ -411,7 +428,7 @@ func (s *server) handleStopWorkersMessage(taskName, stage, task string) {
 
 func (s *server) handleTrainStartMessage(taskName string) {
 	output, success := s.runTrainScript()
-	responseMsg := s.createResponseMessage(success, podName)
+	responseMsg := s.createResponseMessage(success)
 	workerTopic := extractSubscriptionName(taskName) + "-worker"
 	err := s.publishToNATS(workerTopic, responseMsg)
 	if err != nil {
@@ -429,7 +446,7 @@ func (s *server) handleTrainStartMessage(taskName string) {
 	}
 }
 
-func (s *server) createResponseMessage(success bool, podName string) Message {
+func (s *server) createResponseMessage(success bool) Message {
 	msgType := "ACK"
 	data := "Train completed successfully"
 	if !success {
@@ -439,7 +456,7 @@ func (s *server) createResponseMessage(success bool, podName string) Message {
 	}
 
 	return Message{
-		ID:      podName, //这个id应该是pod的name，不是nats的id
+		ID:      s.formattedIP, //这个id应该是pod的name，不是nats的id
 		Time:    time.Now().Format(time.RFC3339),
 		MsgType: msgType,
 		Data:    data,
@@ -448,7 +465,7 @@ func (s *server) createResponseMessage(success bool, podName string) Message {
 
 func (s *server) exitWorkerProcessAndPod(taskName string, message Message) {
 	// Check if we need to terminate the worker process and Pod
-	if message.ID == podName {
+	if message.ID == s.formattedIP {
 		log.Printf("Received exit message for task: %s, terminating worker process and Pod", taskName)
 		s.terminateOneWorker(taskName)
 	}
@@ -462,18 +479,8 @@ func (s *server) terminateOneWorker(taskName string) {
 		}
 	}()
 
-	// 创建 Kubernetes 客户端
-	config, err := rest.InClusterConfig()
-	if err != nil {
-		log.Fatalf("Failed to create in-cluster config: %v", err)
-	}
-	s.clientset, err = kubernetes.NewForConfig(config)
-	if err != nil {
-		log.Fatalf("Failed to create Kubernetes clientset: %v", err)
-	}
-
 	// 获取当前 Pod 对象
-	pod, err := s.clientset.CoreV1().Pods("kubeflow").Get(context.Background(), podName, metav1.GetOptions{})
+	pod, err := s.clientset.CoreV1().Pods("kubeflow").Get(context.Background(), s.podName, metav1.GetOptions{})
 	if err != nil {
 		log.Fatalf("Failed to get Pod: %v", err)
 	}
@@ -485,7 +492,7 @@ func (s *server) terminateOneWorker(taskName string) {
 	}
 	// Prepare a response message
 	responseMsg := Message{
-		ID:      podName,
+		ID:      s.formattedIP,
 		Time:    time.Now().Format(time.RFC3339),
 		MsgType: "ACK",
 		Data:    "Pod exits successfully",
@@ -499,11 +506,11 @@ func (s *server) terminateOneWorker(taskName string) {
 	// 终止 worker 进程
 	log.Println("Terminating worker process...")
 	PodError = true
-	cancel() // 取消 context,停止主进程
+	s.cancel() // 取消 context,停止主进程
 }
 
 func (s *server) terminateWorkerProcessAndPod() {
-	fmt.Println("terminateWorkerProcessAndPod")
+
 	if err := s.sub.Unsubscribe(); err != nil {
 		// Handle the error, perhaps logging it or taking corrective action
 		log.Printf("Failed to unsubscribe: %v", err)
@@ -512,30 +519,14 @@ func (s *server) terminateWorkerProcessAndPod() {
 	} else {
 		log.Println("Unsubscribed successfully")
 	}
-	fmt.Println("Unsubscribed")
-	config, err := rest.InClusterConfig()
-	if err != nil {
-		log.Fatalf("Failed to create in-cluster config: %v", err)
-	}
-	s.clientset, err = kubernetes.NewForConfig(config)
-	if err != nil {
-		log.Fatalf("Failed to create Kubernetes clientset: %v", err)
-	}
-	// 获取当前 Pod 对象
-	pod, err := s.clientset.CoreV1().Pods("kubeflow").Get(context.Background(), podName, metav1.GetOptions{})
-	if err != nil {
-		log.Fatalf("Failed to get Pod: %v", err)
-	}
-
-	// 检查 Pod 的状态
-	if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
-		log.Printf("Pod is already in %s state, no need to terminate", pod.Status.Phase)
-		return
-	}
 
 	// 终止 worker 进程
 	log.Println("Terminating worker process...")
-	cancel() // 取消 context, 停止主进程
+	if s.cancel != nil {
+		s.cancel() // 取消 context, 停止主进程
+	} else {
+		log.Println("Cancel function is not initialized.")
+	}
 
 	// 此处不需要更新 Pod 状态，Kubernetes 会根据容器退出代码自动更新
 	log.Println("Worker process is scheduled for termination.")
@@ -588,7 +579,7 @@ func (s *server) createWarmupResponseMessage(message Message, success bool) Mess
 	}
 
 	return Message{
-		ID:      message.ID, //这个应该改一下，应该是pod的name
+		ID:      s.formattedIP, //这个应该改一下，应该是pod的name
 		Time:    time.Now().Format(time.RFC3339),
 		MsgType: msgType,
 		Data:    data,

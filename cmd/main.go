@@ -12,7 +12,7 @@ import (
 	clientset "gitlab.infini-ai.com/mizar/asterism/fault-tolerance/generated/clientset/versioned"
 	informers "gitlab.infini-ai.com/mizar/asterism/fault-tolerance/generated/informers/externalversions"
 	statuswatchv1 "gitlab.infini-ai.com/mizar/asterism/fault-tolerance/pkg/apis/example.com/v1"
-	"gitlab.infini-ai.com/mizar/asterism/fault-tolerance/pkg/controllers"
+	controllers "gitlab.infini-ai.com/mizar/asterism/fault-tolerance/pkg/reconstructed_controllers"
 )
 
 func main() {
@@ -39,7 +39,11 @@ func main() {
 	}
 
 	// 创建我们的自定义资源的 informer 工厂
-	swInformerFactory := informers.NewSharedInformerFactory(swClient, time.Second*30)
+	swInformerFactory := informers.NewSharedInformerFactoryWithOptions(
+		swClient,
+		time.Second*30,
+		informers.WithNamespace("kubeflow"), // 这里指定仅监听 'kubeflow' 命名空间下的资源
+	)
 
 	// 初始化控制器
 	controller := controllers.NewController(kubeClient, swClient, swInformerFactory.Statuswatch().V1().StatusWatches(), cfg)
