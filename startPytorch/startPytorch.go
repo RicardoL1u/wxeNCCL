@@ -222,6 +222,11 @@ func watchStatefulSetsAndPods(kubeClient *kubernetes.Clientset, swClient *status
 				continue
 			}
 
+			if pod.Status.Phase == corev1.PodSucceeded {
+				log.Printf("Pod %s has succeeded; no updates will be made for StatusWatch.", pod.Name)
+				continue
+			}
+
 			switch event.Type {
 			case watch.Modified:
 				log.Printf("Pod %s is modified: %s", pod.Name, taskName)
@@ -279,9 +284,16 @@ func updateCRDForPytorchJob(kubeClient *kubernetes.Clientset, swClient *statuswa
 	// 根据当前 Pod 列表准备更新的 Workers 数组
 	var workers []statuswatchv1.WorkerSpec
 	for _, pod := range podList.Items {
+		formattedIP := strings.ReplaceAll(pod.Status.PodIP, ".", "-") // 替换点为破折号
+		totalRestarts := 0
+		for _, cs := range pod.Status.ContainerStatuses {
+			totalRestarts += int(cs.RestartCount)
+		}
+
+		podUIDWithRestarts := fmt.Sprintf("%s-%d", pod.ObjectMeta.UID, totalRestarts)
 		workers = append(workers, statuswatchv1.WorkerSpec{
-			Name:    pod.Name,
-			PodUUID: string(pod.ObjectMeta.UID),
+			Name:    formattedIP,
+			PodUUID: podUIDWithRestarts,
 		})
 	}
 
@@ -517,7 +529,7 @@ func createPyTorchJob(clientset *kubernetes.Clientset, dynamicClient *dynamic.Dy
 								"initContainers": []map[string]interface{}{
 									{
 										"name":  "init-setup",
-										"image": "fortypercent/init:v3.4.6",
+										"image": "fortypercent/init:v3.5.2",
 										"command": []string{
 											"sh",
 											"-c",
@@ -537,7 +549,7 @@ func createPyTorchJob(clientset *kubernetes.Clientset, dynamicClient *dynamic.Dy
 									"command": []string{
 										"sh",
 										"-c",
-										"ls && cd /app/data/ && ls && ./worker-linux-arm",
+										"cd /app/data/ && ./worker-linux-arm",
 									},
 									"env": []interface{}{
 										map[string]interface{}{
