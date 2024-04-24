@@ -123,7 +123,9 @@ func (c *Controller) stopAllWorkers(stage, statusWatchName string) {
 
 // handleDiagnostics runs diagnostics and takes action based on the results.
 func (c *Controller) handleDiagnostics(stage, statusWatchName string) {
-	if rand.Intn(2) == 0 { // 50% chance to fail
+	a := rand.Intn(2)
+	a = 0
+	if a == 0 { // 50% chance to fail
 		podName, err := c.getRandomPodName(statusWatchName)
 		if err != nil {
 			log.Printf("Failed to get random pod name for %s diagnostics: %v", stage, err)

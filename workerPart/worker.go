@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"log"
 	"os"
@@ -44,13 +45,13 @@ type server struct {
 	cancel        context.CancelFunc
 	formattedIP   string
 	podName       string
+	PodError      bool
 }
 
 var (
 	accountSeed   []byte
 	userPublicKey string
 	mutex         sync.RWMutex
-	PodError      bool
 )
 
 // func getPort() (int32, error) {
@@ -119,7 +120,6 @@ func (s *server) startGRPCServer(natsConnChan chan *nats.Conn, taskName string) 
 	if err != nil {
 		log.Fatalf("failed to get hostname: %v", err)
 	}
-	fmt.Println("hostname", hostname)
 	// 获取 headless service 的名称
 	headlessService := os.Getenv("HEADLESS_SERVICE_NAME")
 	if headlessService == "" {
@@ -237,9 +237,7 @@ func main() {
 		log.Fatal("Pod IP not available")
 	}
 
-	fmt.Println("podIP", podIP)
 	formattedIP := strings.ReplaceAll(podIP, ".", "-")
-	fmt.Println("formattedIP", formattedIP)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -250,8 +248,8 @@ func main() {
 		cancel:        cancel,
 		formattedIP:   formattedIP,
 		podName:       podName,
+		PodError:      false,
 	}
-
 	natsConnChan := make(chan *nats.Conn)
 	go s.startGRPCServer(natsConnChan, taskName)
 
@@ -260,8 +258,13 @@ func main() {
 		log.Println("NATS connection established")
 		defer s.natsConn.Close()
 	case <-ctx.Done():
-		log.Println("Context canceled, exiting...")
-		return
+		if s.PodError {
+			log.Println("killed")
+			os.Exit(1)
+		} else {
+			log.Println("Context canceled, exiting...")
+			return
+		}
 	}
 
 	signalCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
@@ -269,34 +272,44 @@ func main() {
 
 	<-signalCtx.Done()
 	log.Println("Received termination signal, exiting...")
+	if s.PodError {
+		log.Println("killed")
+		os.Exit(1)
+	} else {
+		log.Println("Context canceled, exiting...")
+		return
+	}
 }
 
 func (s *server) SubscribeToTask(ctx context.Context, req *pb.TaskSubscription) (*pb.SubscriptionResponse, error) {
-	fmt.Println(<-s.natsConnected)
+	<-s.natsConnected
 	taskName := req.TaskName
 	log.Printf("Received task subscription request for task: %s", taskName)
 
 	// 提取订阅主题名称
 	subscription := extractSubscriptionName(taskName)
 	taskSubscription := subscription + "-master"
-	log.Printf("Subscribing to task: %s", taskSubscription)
 
 	if s.sub != nil {
 		log.Printf("Already subscribed to task: %s, skipping new subscription", taskSubscription)
 		return &pb.SubscriptionResponse{Success: false, Message: "Already subscribed"}, nil
 	}
+	maxRetries := 3
+	var err error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		sub, err := s.natsConn.Subscribe(taskSubscription, s.handleTaskMessage(taskName))
+		if err == nil {
+			s.sub = sub
+			log.Printf("Successfully subscribed to task on attempt %d", attempt)
+			return &pb.SubscriptionResponse{Success: true, Message: "Subscribed successfully"}, nil
+		}
 
-	// 订阅任务消息
-	sub, err := s.natsConn.Subscribe(taskSubscription, s.handleTaskMessage(taskName))
-	if err != nil {
-		log.Printf("Failed to subscribe to task: %v", err)
-		return &pb.SubscriptionResponse{Success: false, Message: "Failed to subscribe to task"}, nil
+		log.Printf("Failed to subscribe to task on attempt %d: %v", attempt, err)
+		time.Sleep(time.Second * time.Duration(attempt)) // Exponential back-off could be considered here
 	}
 
-	s.sub = sub
-
-	log.Printf("Subscribed to task: %s", taskSubscription)
-	return &pb.SubscriptionResponse{Success: true, Message: "Task subscribed successfully"}, nil
+	log.Printf("Failed to subscribe to task after %d attempts", maxRetries)
+	return &pb.SubscriptionResponse{Success: false, Message: "Failed to subscribe to task after multiple attempts"}, err
 }
 
 func extractSubscriptionName(taskName string) string {
@@ -314,18 +327,14 @@ func (s *server) handleTaskMessage(taskName string) func(msg *nats.Msg) {
 		if temp != nil && temp == msg {
 
 		} else {
-			fmt.Println("msg", msg)
-			fmt.Println("temp", temp)
 			temp = msg
 			callCount++
-			fmt.Printf("闭包被调用了 %d 次, 处理来自任务 %s 的消息\n", callCount, taskName)
 			var message Message
 			err := json.Unmarshal(msg.Data, &message)
 			if err != nil {
 				log.Printf("Failed to unmarshal message: %v", err)
 				return
 			}
-			fmt.Printf("Received message: %v\n", message)
 			if message.MsgType == "order" {
 				log.Printf("Received order message for task: %s", taskName)
 				// 判断是否为停止工作的消息
@@ -505,7 +514,7 @@ func (s *server) terminateOneWorker(taskName string) {
 	}
 	// 终止 worker 进程
 	log.Println("Terminating worker process...")
-	PodError = true
+	s.PodError = true
 	s.cancel() // 取消 context,停止主进程
 }
 
@@ -534,32 +543,56 @@ func (s *server) terminateWorkerProcessAndPod() {
 
 func (s *server) runTrainScript() (string, bool) {
 	log.Printf("Starting train process...")
+	fmt.Println("-----------------")
 	cmd := exec.Command("python", "/app/train_ddp.py")
-	output, err := cmd.CombinedOutput()
-	lines := strings.Split(string(output), "\n")
-	lastLine := lines[len(lines)-1]
+
+	// 创建 stdout 和 stderr 的管道
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		log.Fatalf("Failed to create stdout pipe: %v", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		log.Fatalf("Failed to create stderr pipe: %v", err)
+	}
+
+	// 启动命令
+	if err := cmd.Start(); err != nil {
+		log.Fatalf("Failed to start command: %v", err)
+	}
+
+	// 使用 bufio.Scanner 实时读取输出
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		fmt.Println(scanner.Text()) // 打印每一行输出
+	}
+
+	// 也读取 stderr
+	errScanner := bufio.NewScanner(stderr)
+	for errScanner.Scan() {
+		log.Println(errScanner.Text()) // 打印每一行错误输出
+	}
+
+	// 等待命令完成
+	if err := cmd.Wait(); err != nil {
 		log.Printf("Failed to execute train process: %v", err)
-		log.Printf("Output: %s", string(output))
-		return lastLine, false
+		return "", false
 	}
 
 	exitCode := cmd.ProcessState.ExitCode()
 	if exitCode == 0 {
 		log.Println("Train process completed successfully")
-		return lastLine, true
+		return "Success", true // 返回一条成功消息
 	} else {
 		log.Printf("Train process exited with code %d", exitCode)
-		return lastLine, false
+		return "Failed", false // 返回一条失败消息
 	}
 }
 
 func (s *server) handleWarmupMessage(taskName string, message Message) {
 	success := s.runWarmupScript()
 	responseMsg := s.createWarmupResponseMessage(message, success)
-	fmt.Println("responseMsg", responseMsg)
 	workerTopic := extractSubscriptionName(taskName) + "-worker"
-	fmt.Println("workerTopic", workerTopic)
 	err := s.publishToNATS(workerTopic, responseMsg)
 	if err != nil {
 		log.Printf("Failed to publish warmup response message to %s: %v", workerTopic, err)
@@ -588,11 +621,41 @@ func (s *server) createWarmupResponseMessage(message Message, success bool) Mess
 
 func (s *server) runWarmupScript() bool {
 	log.Printf("Starting warmup process...")
+	fmt.Println("-----------------")
 	cmd := exec.Command("python", "warmup.py")
-	output, err := cmd.CombinedOutput()
+	// 创建 stdout 和 stderr 的管道
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		log.Fatalf("Failed to create stdout pipe: %v", err)
+		return false
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		log.Fatalf("Failed to create stderr pipe: %v", err)
+		return false
+	}
+
+	// 启动命令
+	if err := cmd.Start(); err != nil {
+		log.Fatalf("Failed to start command: %v", err)
+		return false
+	}
+
+	// 使用 bufio.Scanner 实时读取输出
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		fmt.Println("Warmup output:", scanner.Text()) // 打印每一行标准输出
+	}
+
+	// 也读取 stderr
+	errScanner := bufio.NewScanner(stderr)
+	for errScanner.Scan() {
+		log.Println("Warmup error:", errScanner.Text()) // 打印每一行错误输出
+	}
+
+	// 等待命令完成
+	if err := cmd.Wait(); err != nil {
 		log.Printf("Failed to execute warmup process: %v", err)
-		log.Printf("Output: %s", string(output))
 		return false
 	}
 
@@ -613,7 +676,6 @@ func (s *server) runWarmupScript() bool {
 // 2. pod挂掉的时候，他的grpc就会挂掉，然后订阅就会结束
 
 func (s *server) publishToNATS(topic string, msg Message) error {
-	fmt.Println("msg", msg)
 	// 序列化消息
 	msgData, err := json.Marshal(msg)
 	if err != nil {
@@ -625,7 +687,6 @@ func (s *server) publishToNATS(topic string, msg Message) error {
 	if err != nil {
 		return fmt.Errorf("failed to publish message to %s: %v", topic, err)
 	} else {
-		fmt.Println("published")
 		return nil
 	}
 }

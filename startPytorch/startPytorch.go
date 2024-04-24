@@ -677,8 +677,10 @@ func createStatusWatch(clientset *kubernetes.Clientset, statuswatchClientset *st
 		formattedIP := strings.Replace(podIP, ".", "-", -1)
 		fmt.Printf("Formatted IP: %s\n", formattedIP)
 
+		podUIDWithRestarts := fmt.Sprintf("%s-%d", pod.ObjectMeta.UID, 0)
+
 		statusWatch.Spec.Workers = append(statusWatch.Spec.Workers, statuswatchv1.WorkerSpec{
-			PodUUID: string(pod.ObjectMeta.UID),
+			PodUUID: string(podUIDWithRestarts),
 			Name:    formattedIP, //暂时变成IP
 		})
 	}
