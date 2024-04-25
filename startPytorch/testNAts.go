@@ -10,8 +10,8 @@ import (
 
 func main() {
 	// 假设这些是你的用户密钥对和操作者的公钥
-	userPublicKey := "UCD67V6N5IE2BSHNJXLZ33U7TLKFNCUUU7KO2PQQRCIUKCHXEVY42DV7"
-	userSeed := "SAACLS5X4ZFNEUJPHADLXUG6I2NXNDGYA6ZZJ2C244UZQUV2D7Z2CFHNG4"
+	userPublicKey := "UACIVGKAKVVCZILYZED4RXNPVS462RTTDR6KTMYE2EAETVBLGJ2AGFH2"
+	userSeed := "SAAFNTQEOJHRTJOCCNGGV27COAJIZSWBTVB4TDXXOY7ULTKZ5BPU4G4VUU"
 
 	// 加载用户的nkeys
 	ukp, err := nkeys.FromSeed([]byte(userSeed))
@@ -44,7 +44,7 @@ func main() {
 	// 这里可以继续进行消息的订阅或发布等操作
 
 	// 订阅"test-master"主题并设置消息处理函数
-	_, err = nc.Subscribe("test-master", func(m *nats.Msg) {
+	_, err = nc.Subscribe("test-worker", func(m *nats.Msg) {
 		log.Printf("Received message on [%s]: %s", m.Subject, string(m.Data))
 	})
 	if err != nil {

@@ -18,7 +18,7 @@ spec:
       serviceAccountName: statuswatch-controller-sa
       containers:
       - name: statuswatch-controller
-        image: fortypercent/master:v1.4.6
+        image: fortypercent/master:v1.5.5
         imagePullPolicy: IfNotPresent
         command: ["./master-linux-arm"]
         resources:

@@ -51,14 +51,15 @@ func (c *Controller) updateWorkerConfig(conn *grpc.ClientConn, worker myappv1.Wo
 		_, err = client.UpdateWorkerConfig(ctx, &pb.UpdateConfigRequest{AccountSecretKey: accountSeed, UsrPublicKey: userPublicKey})
 		cancel()
 		if err == nil {
-			log.Printf("Updated config for worker %s successfully", worker.Name)
+			c.infoLogger.Printf("Successfully updated configuration for worker: %s", worker.Name)
 			return true
 		}
-		log.Printf("Failed to update config for worker %s on attempt %d: %v", worker.Name, i+1, err)
+		c.errorLogger.Printf("Attempt %d to update configuration for worker %s failed: %v", i+1, worker.Name, err)
 		time.Sleep(retryDelay)
 	}
 
-	log.Printf("Failed to update config for worker %s after %d attempts", worker.Name, maxRetries)
+	c.errorLogger.Printf("Unable to update configuration for worker %s despite %d attempts", worker.Name, maxRetries)
+
 	return false
 }
 
@@ -74,14 +75,14 @@ func (c *Controller) subscribeToTask(conn *grpc.ClientConn, worker myappv1.Worke
 		r, err := client.SubscribeToTask(ctx, &pb.TaskSubscription{TaskName: taskName})
 		cancel()
 		if err == nil {
-			log.Printf("Subscribed to task on worker %s successfully: %s", worker.PodUUID, r.GetMessage())
+			c.infoLogger.Printf("Successfully subscribed to task on worker %s: %s", worker.Name, r.GetMessage())
 			conn.Close()
 			return true
 		}
-		log.Printf("Failed to subscribe to task on worker %s on attempt %d: %v", worker.PodUUID, i+1, err)
+		c.errorLogger.Printf("Subscription attempt %d to task on worker %s failed: %v", i+1, worker.Name, err)
 		time.Sleep(retryDelay)
 	}
 
-	log.Printf("Failed to subscribe to task on worker %s after %d attempts", worker.PodUUID, maxRetries)
+	c.errorLogger.Printf("Unable to subscribe to task on worker %s despite %d attempts", worker.Name, maxRetries)
 	return false
 }

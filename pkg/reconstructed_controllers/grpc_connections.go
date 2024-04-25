@@ -18,7 +18,6 @@ package reconstructed_controllers
 import (
 	"context"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
@@ -46,7 +45,7 @@ func (c *Controller) connectAndSubscribeWorkers(statuswatch *myappv1.StatusWatch
 	}
 
 	wg.Wait()
-	log.Printf("Successfully subscribed workers: %d", successfulSubscriptions)
+	c.infoLogger.Printf("Successfully subscribed workers: %d", successfulSubscriptions)
 	return successfulSubscriptions
 }
 
@@ -54,7 +53,7 @@ func (c *Controller) subscribeWorker(worker myappv1.WorkerSpec, accountUkp, ukp 
 	headlessService := getHeadlessServiceName()
 	conn, err := c.connectToWorker(worker, headlessService)
 	if err != nil {
-		log.Printf("Failed to connect to worker %s: %v", worker.Name, err)
+		c.errorLogger.Printf("Failed to connect to worker %s: %v", worker.Name, err)
 		return false
 	}
 	defer conn.Close()
@@ -76,9 +75,10 @@ func (c *Controller) connectToWorker(worker myappv1.WorkerSpec, headlessService 
 		conn, err := grpc.DialContext(ctx, fmt.Sprintf("%s:%d", podDNS, 8888), grpc.WithInsecure(), grpc.WithBlock())
 		cancel()
 		if err == nil {
+			c.infoLogger.Printf("Successfully connected to worker %s", worker.Name)
 			return conn, nil
 		}
-		log.Printf("Failed to connect to worker %s on attempt %d: %v", worker.Name, i+1, err)
+		c.errorLogger.Printf("Failed to connect to worker %s on attempt %d: %v", worker.Name, i+1, err)
 		time.Sleep(retryDelay)
 	}
 	return nil, fmt.Errorf("failed to connect to worker %s after %d attempts", worker.Name, maxRetries)

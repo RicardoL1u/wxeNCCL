@@ -16,8 +16,6 @@ limitations under the License.
 package reconstructed_controllers
 
 import (
-	"fmt"
-	"log"
 	"strings"
 
 	"github.com/nats-io/nats.go"
@@ -28,12 +26,12 @@ import (
 func (c *Controller) InitializeSubscriptions(statuswatch *myappv1.StatusWatch) error {
 	workerTopic := c.formatWorkerTopic(statuswatch.Name)
 	sub, err := c.natsConn.Subscribe(workerTopic, func(msg *nats.Msg) {
-		fmt.Printf("Received a message: %s\n", string(msg.Data))
+		c.infoLogger.Printf("Received a message: %s\n", string(msg.Data)) //TODO优化
 		c.handleMessage(msg, statuswatch)
 
 	})
 	if err != nil {
-		log.Fatalf("Failed to subscribe to topic '%s': %v", workerTopic, err)
+		c.errorLogger.Printf("Failed to subscribe to topic '%s': %v", workerTopic, err)
 	}
 	c.natsSubscriptionMap[statuswatch.Name] = sub
 	return nil

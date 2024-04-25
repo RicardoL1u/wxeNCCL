@@ -35,7 +35,7 @@ func init() {
 }
 
 func (c *Controller) DecideAction(message Message, statuswatch *myappv1.StatusWatch) {
-	fmt.Println("message.MsgType", message.MsgType)
+	log.Println("message.MsgType", message.MsgType)
 	switch message.MsgType {
 	case "ACK":
 		c.processAck(message, statuswatch)
@@ -50,35 +50,32 @@ func (c *Controller) processAck(message Message, statuswatch *myappv1.StatusWatc
 
 	switch message.Data {
 	case "Warmup completed":
-		fmt.Println("Warmup completed ACK received")
-		fmt.Println(message)
+		log.Println("Warmup completed ACK received")
 		c.processWarmupCompletedACK(statuswatch)
 	case "Train completed successfully":
 		log.Printf("Training completed successfully for task: %s", statuswatch.Name)
 	case "Pod exits successfully":
 		log.Printf("Pod exits successfully for task: %s", statuswatch.Name)
-		ackCh <- true
 	default:
 		log.Printf("Unhandled ACK data: %s", message.Data)
 	}
 }
 
 func (c *Controller) processError(message Message, statusWatchName string) {
-	log.Printf("Error received: %s", message.Data)
+	log.Printf("Error received: %s", message.Data) // 解析消息时间，打印的好看一点
 
 	// 解析消息时间
 	msgTime, err := time.Parse(time.RFC3339, message.Time)
 	if err != nil {
-		log.Printf("Failed to parse message time: %v", err)
+		log.Printf("Failed to parse message time: %v\n", err)
 		return
 	}
 
 	// 从atomic.Value获取最后一次错误时间
 	lastProcTimeVal := c.lastErrorTime.Load()
-	fmt.Println("lastProcTimeVal", lastProcTimeVal)
 	if lastProcTimeVal != nil {
 		lastProcTime := lastProcTimeVal.(time.Time)
-		if lastProcTime.Equal(msgTime) {
+		if lastProcTime == msgTime {
 			log.Println("Error already processed for this timestamp, skipping.")
 			return
 		}
@@ -91,7 +88,6 @@ func (c *Controller) processError(message Message, statusWatchName string) {
 		log.Println("Error already being processed, skipping duplicate message.")
 		return
 	}
-	defer atomic.StoreInt32(&c.processingError, 0)
 
 	c.handleError(message.Data, statusWatchName)
 }
@@ -123,9 +119,7 @@ func (c *Controller) stopAllWorkers(stage, statusWatchName string) {
 
 // handleDiagnostics runs diagnostics and takes action based on the results.
 func (c *Controller) handleDiagnostics(stage, statusWatchName string) {
-	a := rand.Intn(2)
-	a = 0
-	if a == 0 { // 50% chance to fail
+	if rand.Intn(2) == 0 { // 50% chance to fail
 		podName, err := c.getRandomPodName(statusWatchName)
 		if err != nil {
 			log.Printf("Failed to get random pod name for %s diagnostics: %v", stage, err)
@@ -164,8 +158,8 @@ func (c *Controller) cleanUpPod(statusWatchName, podName string) {
 	//TODO: 适配联想
 	log.Printf("Cleaning up pod %s in the default namespace...", podName)
 	c.publishQuitMessage(statusWatchName, podName)
-	<-ackCh
 	log.Printf("Pod %s cleaned up successfully", podName)
+	atomic.StoreInt32(&c.processingError, 0)
 }
 
 // 重启任务函数

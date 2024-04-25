@@ -19,12 +19,14 @@ package reconstructed_controllers
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/fatih/color"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 	clientset "gitlab.infini-ai.com/mizar/asterism/fault-tolerance/generated/clientset/versioned"
@@ -75,6 +77,8 @@ type Controller struct {
 	// Kubernetes API.
 	recorder      record.EventRecorder
 	lastErrorTime atomic.Value
+	errorLogger   *log.Logger
+	infoLogger    *log.Logger
 }
 
 type Message struct {
@@ -82,6 +86,19 @@ type Message struct {
 	Time    string `json:"time"`
 	MsgType string `json:"msgType"`
 	Data    string `json:"Data"`
+}
+
+type colorWriter struct {
+	w     io.Writer
+	color *color.Color
+}
+
+func (cw *colorWriter) Write(p []byte) (n int, err error) {
+	_, err = cw.color.Fprintf(cw.w, "%s", p)
+	if err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }
 
 var successfulACK int
@@ -100,7 +117,14 @@ func NewController(
 	eventBroadcaster.StartStructuredLogging(0)
 	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: kubeclientset.CoreV1().Events("")})
 	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: controllerAgentName})
+	// 创建一个带颜色的 Writer 用于错误信息
+	redColor := color.New(color.FgRed, color.Bold)
 
+	// 创建一个错误信息的 logger，输出到带颜色的 Writer
+	errorLogger := log.New(&colorWriter{w: os.Stdout, color: redColor}, "ERROR: ", log.Ldate|log.Ltime|log.Lshortfile)
+
+	// 使用默认的 logger 用于其他日志信息
+	infoLogger := log.New(os.Stdout, "INFO: ", log.Ldate|log.Ltime|log.Lshortfile)
 	controller := &Controller{
 		kubeconfig:            cfg,
 		statusWatchStates:     make(map[string]bool),
@@ -113,6 +137,8 @@ func NewController(
 		workqueue:             workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "GoddessMoments"),
 		recorder:              recorder,
 		processingError:       0,
+		errorLogger:           errorLogger,
+		infoLogger:            infoLogger,
 	}
 
 	// 建立 NATS 连接
@@ -277,7 +303,6 @@ func (c *Controller) processNextWorkItem() bool {
 func (c *Controller) syncHandler(key string) error {
 	// Convert the namespace/name string into a distinct namespace and name
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
-	fmt.Println(namespace, name)
 	if err != nil {
 		utilruntime.HandleError(fmt.Errorf("invalid resource key: %s", key))
 		return nil
@@ -334,15 +359,12 @@ func findUpdates(oldWorkers map[string]myappv1.WorkerSpec, newWorkers []myappv1.
 }
 
 func (c *Controller) handleStatusWatchCreated(statuswatch *myappv1.StatusWatch) {
-	fmt.Println(statuswatch, "created", statuswatch.Namespace)
-	fmt.Printf("Number of workers: %d\n", statuswatch.Spec.Number)
-
 	if err := c.setupWorkers(statuswatch); err != nil {
-		log.Printf("Failed during worker setup: %v", err)
+		c.errorLogger.Printf("Failed during worker setup: %v", err)
 		return
 	}
 	if err := c.InitializeSubscriptions(statuswatch); err != nil {
-		log.Printf("Failed to initialize subscriptions: %v", err)
+		c.errorLogger.Printf("Failed to initialize subscriptions: %v", err)
 		return
 	} else {
 		c.publishReadyMessage(statuswatch.Name)
@@ -352,10 +374,11 @@ func (c *Controller) handleStatusWatchCreated(statuswatch *myappv1.StatusWatch) 
 func (c *Controller) setupWorkers(statuswatch *myappv1.StatusWatch) error {
 	accountUkp, ukp, err := c.generateAndDistributePublicKey(statuswatch)
 	if err != nil {
+		c.errorLogger.Printf("failed to generate user NKeys for %s: %v", statuswatch.Name, err)
 		return err
 	}
 
-	log.Println("Waiting for 10 seconds before connecting and subscribing workers...")
+	c.infoLogger.Println("Waiting for connecting and subscribing workers...")
 	time.Sleep(10 * time.Second)
 
 	successfulSubscriptions := c.connectAndSubscribeWorkers(statuswatch, accountUkp, statuswatch.Spec.Workers, ukp)
@@ -367,30 +390,29 @@ func (c *Controller) setupWorkers(statuswatch *myappv1.StatusWatch) error {
 }
 
 func (c *Controller) handleStatusWatchDeleted(name string) {
-	log.Printf("StatusWatch %s deleted\n", name)
+	c.infoLogger.Printf("StatusWatch %s deleted\n", name)
 
 	if sub, ok := c.natsSubscriptionMap[name]; ok {
 		if err := sub.Unsubscribe(); err != nil {
-			log.Printf("Failed to unsubscribe from task '%s': %v", name, err)
+			c.errorLogger.Printf("Failed to unsubscribe from task '%s': %v", name, err)
 		}
 		delete(c.natsSubscriptionMap, name)
 	}
 
 	c.publicKeyMap.Delete(name)
 	c.accountPublicKeyMap.Delete(name)
-	log.Printf("Cleanup completed for StatusWatch %s", name)
+	c.infoLogger.Printf("Cleanup completed for StatusWatch %s", name)
 }
 
 func (c *Controller) handleStatusWatchUpdated(newStatuswatch *myappv1.StatusWatch) {
 	// 比较新旧StatusWatch的变化,找到发生变化的worker
 	updatedWorkers := c.taskUpdatedWorkersMap[newStatuswatch.Name]
-	log.Printf("Updated workers number for task '%s': %v", newStatuswatch.Name, len(updatedWorkers))
+	c.infoLogger.Printf("Updated workers number for task '%s': %v", newStatuswatch.Name, len(updatedWorkers))
 
 	ukp, _ := c.publicKeyMap.Load(newStatuswatch.Name)
 	accountUkp, _ := c.accountPublicKeyMap.Load(newStatuswatch.Name)
-
 	if successfulSubscriptions := c.connectAndSubscribeWorkers(newStatuswatch, accountUkp.(nkeys.KeyPair), updatedWorkers, ukp.(nkeys.KeyPair)); successfulSubscriptions == len(updatedWorkers) {
-		log.Println("All updated workers resubscribed successfully")
+		c.infoLogger.Println("All updated workers resubscribed successfully")
 		c.publishRetrainMessage(newStatuswatch.Name)
 	}
 }
@@ -411,7 +433,7 @@ func (c *Controller) generateAndDistributePublicKey(statuswatch *myappv1.StatusW
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to update NATS Auth Secret: %v", err)
 	}
-	fmt.Println("NATS Auth Secret 已更新")
+	c.infoLogger.Printf("NATS Auth Secret for %s has been updated.", statuswatch.Name)
 
 	return accountUkp, usrUkp, nil
 }
@@ -469,7 +491,6 @@ func getHeadlessServiceName() string {
 	headlessService := os.Getenv("HEADLESS_SERVICE_NAME")
 	if headlessService == "" {
 		headlessService = "grpc-service"
-		log.Printf("HEADLESS_SERVICE_NAME not set, using default: %s", headlessService)
 	}
 	return headlessService
 }

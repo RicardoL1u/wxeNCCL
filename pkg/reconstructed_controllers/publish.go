@@ -18,7 +18,6 @@ package reconstructed_controllers
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 )
@@ -26,13 +25,13 @@ import (
 func (c *Controller) PublishMessage(topic string, message Message) {
 	data, err := json.Marshal(message)
 	if err != nil {
-		log.Printf("Error marshaling message: %v", err)
+		c.errorLogger.Printf("Error marshaling message: %v", err)
 		return
 	}
 	if err := c.natsConn.Publish(topic, data); err != nil {
-		log.Printf("Failed to publish message: %v", err)
+		c.errorLogger.Printf("Failed to publish message: %v", err)
 	} else {
-		log.Printf("Published message: %s", string(data))
+		c.infoLogger.Printf("Published message: %s", string(data))
 	}
 }
 
@@ -79,7 +78,6 @@ func (c *Controller) publishTrainMessage(statusName string) {
 		Data:    "train start",
 	}
 	masterTopic := c.formatMasterTopic(statusName)
-	fmt.Println("msg", msg)
 	c.PublishMessage(masterTopic, msg)
 }
 

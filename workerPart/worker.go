@@ -542,8 +542,7 @@ func (s *server) terminateWorkerProcessAndPod() {
 }
 
 func (s *server) runTrainScript() (string, bool) {
-	log.Printf("Starting train process...")
-	fmt.Println("-----------------")
+	log.Printf("Starting train process...\n-----------------")
 	cmd := exec.Command("python", "/app/train_ddp.py")
 
 	// 创建 stdout 和 stderr 的管道
@@ -620,8 +619,7 @@ func (s *server) createWarmupResponseMessage(message Message, success bool) Mess
 }
 
 func (s *server) runWarmupScript() bool {
-	log.Printf("Starting warmup process...")
-	fmt.Println("-----------------")
+	log.Printf("Starting warmup process...\n-----------------")
 	cmd := exec.Command("python", "warmup.py")
 	// 创建 stdout 和 stderr 的管道
 	stdout, err := cmd.StdoutPipe()
