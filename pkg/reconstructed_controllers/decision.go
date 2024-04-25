@@ -27,22 +27,14 @@ import (
 	myappv1 "gitlab.infini-ai.com/mizar/asterism/fault-tolerance/pkg/apis/example.com/v1"
 )
 
-var ackCh chan bool
-
-func init() {
-	rand.Seed(time.Now().UnixNano())
-	ackCh = make(chan bool)
-}
-
 func (c *Controller) DecideAction(message Message, statuswatch *myappv1.StatusWatch) {
-	log.Println("message.MsgType", message.MsgType)
 	switch message.MsgType {
 	case "ACK":
 		c.processAck(message, statuswatch)
 	case "error":
 		c.processError(message, statuswatch.Name)
 	default:
-		log.Printf("Received unknown message type: %s", message.MsgType)
+		c.infoLogger.Printf("Received unknown message type: %s\n", message.MsgType)
 	}
 }
 
@@ -50,19 +42,19 @@ func (c *Controller) processAck(message Message, statuswatch *myappv1.StatusWatc
 
 	switch message.Data {
 	case "Warmup completed":
-		log.Println("Warmup completed ACK received")
+		c.infoLogger.Println("Warmup completed ACK received")
 		c.processWarmupCompletedACK(statuswatch)
 	case "Train completed successfully":
-		log.Printf("Training completed successfully for task: %s", statuswatch.Name)
+		c.infoLogger.Printf("Training completed successfully for task: %s", statuswatch.Name)
 	case "Pod exits successfully":
-		log.Printf("Pod exits successfully for task: %s", statuswatch.Name)
+		c.infoLogger.Printf("Pod exits successfully for task: %s", statuswatch.Name)
 	default:
-		log.Printf("Unhandled ACK data: %s", message.Data)
+		c.infoLogger.Printf("Unhandled ACK data: %s", message.Data)
 	}
 }
 
 func (c *Controller) processError(message Message, statusWatchName string) {
-	log.Printf("Error received: %s", message.Data) // 解析消息时间，打印的好看一点
+	c.errorLogger..Printf("Error received: %s", message.Data) // 解析消息时间，打印的好看一点
 
 	// 解析消息时间
 	msgTime, err := time.Parse(time.RFC3339, message.Time)
