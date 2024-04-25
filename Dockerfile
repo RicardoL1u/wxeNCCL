@@ -10,4 +10,4 @@ COPY go.mod go.sum ./
 COPY workerPart/ ./
 
 # 将 Python 代码和依赖复制到镜像中
-COPY pythonFile/warmup.py ./
+COPY diagnostics/warmup_cpu.py ./

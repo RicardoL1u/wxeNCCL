@@ -403,9 +403,9 @@ func (s *server) handleStopWorkersMessage(taskName, stage, task string) {
 	scriptName := ""
 	switch stage {
 	case "Warmup":
-		scriptName = "warmup.py"
+		scriptName = "warmup_cpu.py"
 	case "Train":
-		scriptName = "train_ddp.py"
+		scriptName = "simulation_train_ddp.py"
 	}
 
 	// If a script is identified, attempt to kill its processes
@@ -543,7 +543,7 @@ func (s *server) terminateWorkerProcessAndPod() {
 
 func (s *server) runTrainScript() (string, bool) {
 	log.Printf("Starting train process...\n-----------------")
-	cmd := exec.Command("python", "/app/train_ddp.py")
+	cmd := exec.Command("python", "/app/simulation_train_ddp.py")
 
 	// 创建 stdout 和 stderr 的管道
 	stdout, err := cmd.StdoutPipe()
@@ -620,7 +620,7 @@ func (s *server) createWarmupResponseMessage(message Message, success bool) Mess
 
 func (s *server) runWarmupScript() bool {
 	log.Printf("Starting warmup process...\n-----------------")
-	cmd := exec.Command("python", "warmup.py")
+	cmd := exec.Command("python", "warmup_cpu.py") //对应的结果是warmup.py 二进制？
 	// 创建 stdout 和 stderr 的管道
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
