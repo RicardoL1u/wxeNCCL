@@ -54,7 +54,7 @@ func (c *Controller) processAck(message Message, statuswatch *myappv1.StatusWatc
 }
 
 func (c *Controller) processError(message Message, statusWatchName string) {
-	c.errorLogger..Printf("Error received: %s", message.Data) // 解析消息时间，打印的好看一点
+	c.errorLogger.Printf("Error received: %s", message.Data) // 解析消息时间，打印的好看一点
 
 	// 解析消息时间
 	msgTime, err := time.Parse(time.RFC3339, message.Time)
