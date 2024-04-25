@@ -18,7 +18,6 @@ package reconstructed_controllers
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"math/rand"
 	"sync/atomic"
 	"time"
@@ -43,7 +42,7 @@ func (c *Controller) processAck(message Message, statuswatch *myappv1.StatusWatc
 	switch message.Data {
 	case "Warmup completed":
 		c.infoLogger.Println("Warmup completed ACK received")
-		c.processWarmupCompletedACK(statuswatch)
+		c.processWarmupCompletedACK(statuswatch, message)
 	case "Train completed successfully":
 		c.infoLogger.Printf("Training completed successfully for task: %s", statuswatch.Name)
 	case "Pod exits successfully":
@@ -54,12 +53,12 @@ func (c *Controller) processAck(message Message, statuswatch *myappv1.StatusWatc
 }
 
 func (c *Controller) processError(message Message, statusWatchName string) {
-	c.errorLogger.Printf("Error received: %s", message.Data) // 解析消息时间，打印的好看一点
+	c.infoLogger.Printf("Error received: %s", message.Data) // 解析消息时间，打印的好看一点
 
 	// 解析消息时间
 	msgTime, err := time.Parse(time.RFC3339, message.Time)
 	if err != nil {
-		log.Printf("Failed to parse message time: %v\n", err)
+		c.errorLogger.Printf("Failed to parse message time: %v\n", err)
 		return
 	}
 
@@ -68,7 +67,7 @@ func (c *Controller) processError(message Message, statusWatchName string) {
 	if lastProcTimeVal != nil {
 		lastProcTime := lastProcTimeVal.(time.Time)
 		if lastProcTime == msgTime {
-			log.Println("Error already processed for this timestamp, skipping.")
+			c.infoLogger.Println("Error already processed for this timestamp, skipping.")
 			return
 		}
 	}
@@ -77,7 +76,7 @@ func (c *Controller) processError(message Message, statusWatchName string) {
 	c.lastErrorTime.Store(msgTime)
 
 	if !atomic.CompareAndSwapInt32(&c.processingError, 0, 1) {
-		log.Println("Error already being processed, skipping duplicate message.")
+		c.infoLogger.Println("Error already being processed, skipping duplicate message.")
 		return
 	}
 
@@ -93,18 +92,18 @@ func (c *Controller) handleError(errorMsg string, statusWatchName string) {
 		}[errorMsg]
 		successfulACK = 0
 		c.stopAllWorkers(operation, statusWatchName)
-		log.Printf("%s detected. Starting diagnostics...", errorMsg)
+		c.infoLogger.Printf("%s detected. Starting diagnostics...", errorMsg)
 		time.Sleep(10 * time.Second)
 		c.handleDiagnostics(operation, statusWatchName)
 	default:
-		log.Printf("Unknown error type received: %s", errorMsg)
+		c.infoLogger.Printf("Unknown error type received: %s", errorMsg)
 	}
 }
 
 func (c *Controller) stopAllWorkers(stage, statusWatchName string) {
 	// 根据statusName的值执行不同的停止逻辑
 	// 例如，可以根据不同的错误类型来决定是否记录特定的日志，或者是通知某些特定的工作线程停止
-	log.Printf("Stopping all workers for stage: %s, task: %s", stage, statusWatchName)
+	c.infoLogger.Printf("Stopping all workers for stage: %s, task: %s", stage, statusWatchName)
 
 	c.stopWorkersMessage(stage, statusWatchName)
 }
@@ -114,14 +113,14 @@ func (c *Controller) handleDiagnostics(stage, statusWatchName string) {
 	if rand.Intn(2) == 0 { // 50% chance to fail
 		podName, err := c.getRandomPodName(statusWatchName)
 		if err != nil {
-			log.Printf("Failed to get random pod name for %s diagnostics: %v", stage, err)
+			c.errorLogger.Printf("Failed to get random pod name for %s diagnostics: %v", stage, err)
 			return
 		}
-		log.Printf("%s diagnostics finds error pod. Cleaning up pod: %s", stage, podName)
+		c.infoLogger.Printf("Diagnostics at %s stage detected an erroneous pod. Initiating cleanup for pod: %s", stage, podName)
 		c.cleanUpPod(statusWatchName, podName)
 
 	} else {
-		log.Printf("%s diagnostics passed. No action required.", stage)
+		c.infoLogger.Printf("Diagnostics for %s stage completed successfully. No further action is required.", stage)
 		c.restartTask(stage, statusWatchName)
 	}
 }
@@ -148,39 +147,38 @@ func (c *Controller) getRandomPodName(statusWatchName string) (string, error) {
 
 func (c *Controller) cleanUpPod(statusWatchName, podName string) {
 	//TODO: 适配联想
-	log.Printf("Cleaning up pod %s in the default namespace...", podName)
+	c.infoLogger.Printf("Cleaning up pod %s", podName)
 	c.publishQuitMessage(statusWatchName, podName)
-	log.Printf("Pod %s cleaned up successfully", podName)
 	atomic.StoreInt32(&c.processingError, 0)
 }
 
 // 重启任务函数
 func (c *Controller) restartTask(stage, statusWatchName string) {
-	log.Printf("Restarting tasks for stage: %s", stage)
+	c.infoLogger.Printf("Restarting tasks for stage: %s", stage)
 	c.restartTaskMessage(stage, statusWatchName)
 	// 这里添加实际的任务重启逻辑
 }
 
 func (c *Controller) handleMessage(msg *nats.Msg, statuswatch *myappv1.StatusWatch) {
-	log.Printf("Received message from topic '%s'", msg.Subject)
+	c.infoLogger.Printf("Received message from topic '%s'", msg.Subject)
 	var message Message
 	if err := json.Unmarshal(msg.Data, &message); err != nil {
-		log.Printf("Failed to unmarshal message: %v", err)
+		c.errorLogger.Printf("Failed to unmarshal message: %v", err)
 		return
 	}
 	c.DecideAction(message, statuswatch)
 }
 
-func (c *Controller) processWarmupCompletedACK(statuswatch *myappv1.StatusWatch) int {
+func (c *Controller) processWarmupCompletedACK(statuswatch *myappv1.StatusWatch, message Message) int {
 	//TODO: 细化ACK是从哪个worker发来的
 	successfulACK++
 
-	log.Printf("Received ACK from worker. Total ACKs: %d", successfulACK)
+	c.infoLogger.Printf("Received ACK from worker %s. Total ACKs: %d", message.ID, successfulACK)
 
 	// 检查是否达到了StatusWatch中指定的worker数量
 	if successfulACK == int(statuswatch.Spec.Number) {
-		log.Println("Warmup completed for all workers")
-		log.Println("Starting training...")
+		c.infoLogger.Printf("Warmup completed for all workers. Total: %d", successfulACK)
+		c.infoLogger.Println("Starting training...")
 		c.publishTrainMessage(statuswatch.Name)
 	}
 	return successfulACK
