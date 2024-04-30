@@ -1,5 +1,6 @@
 import torch
 import torch.distributed as dist
+#应该是warmup
 
 def main():
     # Check PyTorch compatibility
