@@ -76,6 +76,8 @@ def main():
         else:
             print("Checking distributed training............\033[31m[FAILED]\033[0m")
 
+        sleep(300)
+        
         dist.destroy_process_group()
 
 if __name__ == "__main__":
