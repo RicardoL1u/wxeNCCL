@@ -56,7 +56,9 @@ def main():
         dist.init_process_group(backend='nccl')
 
         rank = dist.get_rank()
+        print(rank)
         world_size = dist.get_world_size()
+        print(world_size)
 
         local_tensor = torch.tensor([rank]).float().cuda()
         dist.all_reduce(local_tensor, op=dist.ReduceOp.SUM)

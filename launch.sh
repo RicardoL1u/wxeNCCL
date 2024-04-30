@@ -27,4 +27,5 @@ DISTRIBUTED_ARGS="
     --master_addr $MASTER_ADDR \
     --master_port $MASTER_PORT"
 
+echo $NODE_RANK
 torchrun $DISTRIBUTED_ARGS testNCCL.py
