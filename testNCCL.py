@@ -1,5 +1,6 @@
 import torch
 import torch.distributed as dist
+import time
 #应该是warmup
 
 def main():
@@ -52,9 +53,14 @@ def main():
         return
 
     if num_gpus > 0:
-        # Initialize distributed process group
+        # Time the initialization of the distributed process group
+        start_time = time.time()  # Start time
         dist.init_process_group(backend='nccl')
-       
+        end_time = time.time()  # End time
+
+        # Print the time taken to initialize the process group
+        print(f"Initialization time for distributed process group: {end_time - start_time:.6f} seconds")
+
         rank = dist.get_rank()
         world_size = dist.get_world_size()
 
